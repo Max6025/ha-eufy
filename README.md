@@ -1,6 +1,10 @@
 # Eufy Max
 
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![Validate](https://github.com/Max6025/eufy_max/actions/workflows/validate.yml/badge.svg)](https://github.com/Max6025/eufy_max/actions/workflows/validate.yml)
+
 Eigene Home-Assistant-Integration für Eufy-Security-Geräte.
+
 
 ## Was anders ist
 
@@ -70,17 +74,31 @@ angelegt hast (Reihenfolge nach Erstellungsdatum).
 Fordert Eufy ein Captcha oder einen Code an, kommt eine Benachrichtigung mit der
 ID. Antwort per Service `eufy_max.set_captcha` bzw. `eufy_max.set_verify_code`.
 
-## Installation
+## Voraussetzung
 
-1. Add-on `eufy-security-ws` installieren und mit dem **Owner-Account** konfigurieren
-   (Repository: `https://github.com/bropat/hassio-eufy-security-ws`)
-2. Ordner `eufy_max` nach `/config/custom_components/eufy_max/` kopieren
-3. Home Assistant neu starten
-4. Einstellungen → Geräte & Dienste → Integration hinzufügen → **Eufy Max**
-5. Host `127.0.0.1`, Port `3000`
+Add-on `eufy-security-ws` installieren und mit dem **Owner-Account** konfigurieren.
+Add-on-Repository in Home Assistant hinzufügen:
 
-Die bestehende `fuatakgun/eufy_security` Integration vorher entfernen — zwei Clients
-auf demselben WS-Server vertragen sich nicht.
+```
+https://github.com/bropat/hassio-eufy-security-ws
+```
+
+## Installation über HACS
+
+1. HACS öffnen → oben rechts die drei Punkte → **Benutzerdefinierte Repositories**
+2. URL `https://github.com/Max6025/eufy_max` eintragen, Kategorie **Integration**
+3. „Eufy Max" suchen und herunterladen
+4. Home Assistant neu starten
+5. Einstellungen → Geräte & Dienste → Integration hinzufügen → **Eufy Max**
+6. Host `127.0.0.1`, Port `3000`
+
+## Installation von Hand
+
+Ordner `custom_components/eufy_max` nach `/config/custom_components/eufy_max/`
+kopieren, Home Assistant neu starten, dann wie oben ab Schritt 5.
+
+> Die bestehende `fuatakgun/eufy_security` Integration vorher entfernen — zwei
+> Clients auf demselben WS-Server vertragen sich nicht.
 
 ## Services
 

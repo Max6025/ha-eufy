@@ -1,9 +1,14 @@
 {
   "domain": "eufy_max",
   "name": "Eufy Max",
-  "codeowners": ["@Max6025"],
+  "codeowners": [
+    "@Max6025"
+  ],
   "config_flow": true,
-  "dependencies": ["ffmpeg", "stream"],
+  "dependencies": [
+    "ffmpeg",
+    "stream"
+  ],
   "documentation": "https://github.com/Max6025/eufy_max",
   "integration_type": "hub",
   "iot_class": "local_push",
