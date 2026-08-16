@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Eufy Max einrichten",
+        "description": "Adresse des eufy-security-ws Servers. Bei einem Add-on auf dem gleichen System ist das 127.0.0.1:3000.",
+        "data": {
+          "host": "Host",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung fehlgeschlagen. Laeuft das Add-on und ist der Port richtig?"
+    },
+    "abort": {
+      "already_configured": "Dieser Server ist bereits eingerichtet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Eufy Max Optionen",
+        "data": {
+          "rtsp_first": "RTSP bevorzugen (empfohlen)",
+          "snapshot_from_stream": "Standbilder aus dem Livestream erzeugen"
+        }
+      }
+    }
+  }
+}

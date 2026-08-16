@@ -1,0 +1,120 @@
+set_captcha:
+  name: Captcha beantworten
+  description: Sendet die Loesung eines Eufy-Captchas an den Treiber.
+  fields:
+    captcha_id:
+      name: Captcha-ID
+      description: Die ID aus der Benachrichtigung.
+      required: true
+      selector:
+        text:
+    captcha:
+      name: Captcha-Text
+      description: Der abgelesene Code.
+      required: true
+      selector:
+        text:
+
+set_verify_code:
+  name: 2FA-Code eingeben
+  description: Sendet den per Mail erhaltenen Bestaetigungscode.
+  fields:
+    verify_code:
+      name: Code
+      description: Der sechsstellige Code aus der Mail.
+      required: true
+      selector:
+        text:
+
+set_property:
+  name: Eigenschaft setzen
+  description: Setzt eine beliebige Geraeteeigenschaft direkt.
+  target:
+    entity:
+      integration: eufy_max
+  fields:
+    property:
+      name: Eigenschaft
+      description: Interner Name der Eigenschaft, z.B. motionDetection.
+      required: true
+      selector:
+        text:
+    value:
+      name: Wert
+      description: Der zu setzende Wert.
+      required: true
+      selector:
+        text:
+
+ptz:
+  name: Schwenken und Neigen
+  description: Bewegt eine schwenkbare Kamera.
+  target:
+    entity:
+      integration: eufy_max
+      domain: camera
+  fields:
+    direction:
+      name: Richtung
+      description: Bewegungsrichtung.
+      required: true
+      selector:
+        select:
+          options:
+            - left
+            - right
+            - up
+            - down
+            - rotate360
+
+reconnect:
+  name: Neu verbinden
+  description: Baut die Verbindung zur Eufy-Cloud neu auf.
+
+start_stream:
+  name: Livestream starten
+  description: Startet den Livestream aller Kameras fuer die eingestellte oder angegebene Dauer.
+  fields:
+    duration:
+      name: Dauer
+      description: Laufzeit in Sekunden. Leer lassen fuer die eingestellte Standarddauer.
+      required: false
+      selector:
+        number:
+          min: 10
+          max: 1800
+          unit_of_measurement: s
+
+stop_stream:
+  name: Livestream stoppen
+  description: Stoppt den Livestream aller Kameras sofort.
+
+set_guard_mode:
+  name: Guard Mode setzen
+  description: Setzt den Eufy Guard Mode direkt. Ohne Ziel gilt er fuer alle Kameras.
+  target:
+    entity:
+      integration: eufy_max
+      domain: alarm_control_panel
+  fields:
+    guard_mode:
+      name: Modus
+      description: 0 abwesend, 1 zuhause, 2 Zeitplan, 3-5 eigene Modi, 6 aus, 47 Geofence, 63 unscharf.
+      required: true
+      selector:
+        select:
+          options:
+            - label: Abwesend
+              value: "0"
+            - label: Zuhause
+              value: "1"
+            - label: Zeitplan
+              value: "2"
+            - label: Eigener Modus 1
+              value: "3"
+            - label: Eigener Modus 2
+              value: "4"
+            - label: Eigener Modus 3
+              value: "5"
+            - label: Unscharf
+              value: "63"
