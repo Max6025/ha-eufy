@@ -8,6 +8,10 @@
           "host": "Host",
           "port": "Port"
         }
+      },
+      "hassio_confirm": {
+        "title": "Eufy Max WS gefunden",
+        "description": "Das Add-on Eufy Max WS wurde unter {addon} gefunden. Jetzt einrichten?"
       }
     },
     "error": {

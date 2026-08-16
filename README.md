@@ -74,31 +74,44 @@ angelegt hast (Reihenfolge nach Erstellungsdatum).
 Fordert Eufy ein Captcha oder einen Code an, kommt eine Benachrichtigung mit der
 ID. Antwort per Service `eufy_max.set_captcha` bzw. `eufy_max.set_verify_code`.
 
-## Voraussetzung
+Diese Integration braucht das zugehörige Add-on aus dem separaten Repo
+[eufy_max_addon](https://github.com/Max6025/eufy_max_addon).
 
-Add-on `eufy-security-ws` installieren und mit dem **Owner-Account** konfigurieren.
-Add-on-Repository in Home Assistant hinzufügen:
+## Schritt 1 — Add-on installieren
+
+Einstellungen → Add-ons → Add-on-Store → drei Punkte oben rechts →
+**Repositories** → diese URL hinzufügen:
 
 ```
-https://github.com/bropat/hassio-eufy-security-ws
+https://github.com/Max6025/eufy_max_addon
 ```
 
-## Installation über HACS
+Dann **Eufy Max WS** installieren, unter Konfiguration E-Mail und Passwort des
+**Owner-Kontos** eintragen und starten. Der Port ist fest 3000, da ist nichts
+einzustellen.
 
-1. HACS öffnen → oben rechts die drei Punkte → **Benutzerdefinierte Repositories**
-2. URL `https://github.com/Max6025/eufy_max` eintragen, Kategorie **Integration**
-3. „Eufy Max" suchen und herunterladen
-4. Home Assistant neu starten
-5. Einstellungen → Geräte & Dienste → Integration hinzufügen → **Eufy Max**
-6. Host `127.0.0.1`, Port `3000`
+## Schritt 2 — Integration installieren
 
-## Installation von Hand
+HACS öffnen → oben rechts die drei Punkte → **Benutzerdefinierte Repositories** →
+URL `https://github.com/Max6025/eufy_max`, Kategorie **Integration** → „Eufy Max"
+herunterladen → Home Assistant neu starten.
 
-Ordner `custom_components/eufy_max` nach `/config/custom_components/eufy_max/`
-kopieren, Home Assistant neu starten, dann wie oben ab Schritt 5.
+Alternativ von Hand: Ordner `custom_components/eufy_max` nach
+`/config/custom_components/eufy_max/` kopieren und neu starten.
 
-> Die bestehende `fuatakgun/eufy_security` Integration vorher entfernen — zwei
-> Clients auf demselben WS-Server vertragen sich nicht.
+## Schritt 3 — nichts
+
+Das Add-on meldet sich beim Start selbst bei der Integration an. Unter
+Einstellungen → Geräte & Dienste erscheint **Eufy Max WS gefunden** — nur noch
+bestätigen. Host und Port muss niemand eintippen.
+
+Falls die automatische Erkennung ausbleibt: Integration von Hand hinzufügen und
+als Host den Add-on-Hostnamen aus dem Add-on-Protokoll eintragen (steht dort in
+der Startmeldung), Port `3000`.
+
+> Die bestehende `fuatakgun/eufy_security` Integration und das Add-on
+> `eufy-security-ws` vorher entfernen — zwei Clients auf demselben Konto werfen
+> sich gegenseitig aus der Eufy-Cloud.
 
 ## Services
 
