@@ -81,8 +81,11 @@ class EufyMaxConfigFlow(ConfigFlow, domain=DOMAIN):
                     data=self._discovered,
                 )
 
+        # Ohne data_schema rendert HA zwar das Formular, der OK-Knopf
+        # sendet aber nichts zurueck. Ein leeres Schema ist Pflicht.
         return self.async_show_form(
             step_id="hassio_confirm",
+            data_schema=vol.Schema({}),
             description_placeholders={
                 "addon": f"{self._discovered[CONF_HOST]}:{self._discovered[CONF_PORT]}"
             },
