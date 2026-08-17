@@ -100,7 +100,13 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
         }
 
     async def stream_source(self) -> str | None:
-        """Streamquelle nur liefern, wenn der Controller den Stream freigibt."""
+        """Streamquelle nur liefern, wenn der Controller den Stream freigibt.
+
+        Es gibt nur eine brauchbare Quelle: die RTSP-URL, die die Kamera
+        selbst meldet. Der P2P-Stream von eufy-security-ws kommt als
+        Datenstrom ueber die WebSocket-Verbindung und laesst sich nicht
+        als URL weiterreichen - dafuer braucht es eine Bruecke.
+        """
         if not self.controller.active:
             _LOGGER.debug(
                 "Streamanfrage fuer %s abgelehnt - Livestream ist aus", self.serial
@@ -111,8 +117,12 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
         if rtsp_url:
             return rtsp_url
 
-        # Kameras ohne RTSP laufen ueber den P2P-Stream des WS-Servers.
-        return f"rtsp://{self.client.host}:8554/{self.serial}"
+        _LOGGER.warning(
+            "%s meldet keine RTSP-URL. Diese Kamera kann nur P2P und "
+            "liefert ohne Bruecke kein Livebild",
+            self.device.get("name", self.serial),
+        )
+        return None
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
