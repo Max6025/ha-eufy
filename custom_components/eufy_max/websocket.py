@@ -280,6 +280,14 @@ class EufyMaxClient:
             _LOGGER.debug("Befehle fuer %s nicht ladbar: %s", serial, err)
             self.commands[serial] = []
 
+        _LOGGER.debug(
+            "%s (%s): %s Eigenschaften, Befehle: %s",
+            self.devices[serial].get("name", serial),
+            self.devices[serial].get("model", "?"),
+            len(self.metadata.get(serial, {})),
+            self.commands.get(serial, []),
+        )
+
     async def _async_load_station_details(self, serial: str) -> None:
         """Eigenschaften einer Station laden - liefert den Guard Mode."""
         try:
@@ -554,8 +562,15 @@ class EufyMaxClient:
         return self.metadata.get(serial, {})
 
     def has_command(self, serial: str, command: str) -> bool:
-        """Pruefen, ob ein Geraet einen Befehl unterstuetzt."""
-        return command in self.commands.get(serial, [])
+        """Pruefen, ob ein Geraet einen Befehl unterstuetzt.
+
+        Der Server liefert die Namen ohne Praefix und in snake_case,
+        also 'start_livestream' statt 'device.start_livestream'. Hier
+        werden beide Schreibweisen akzeptiert.
+        """
+        available = self.commands.get(serial, [])
+        wanted = command.split(".")[-1]
+        return any(entry.split(".")[-1] == wanted for entry in available)
 
     def add_listener(self, callback: Callable[[str, str | None], None]) -> Callable:
         """Listener fuer Zustandsaenderungen registrieren."""

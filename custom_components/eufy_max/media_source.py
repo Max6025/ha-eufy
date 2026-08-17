@@ -19,6 +19,7 @@ from homeassistant.components.media_source.models import (
     MediaSourceItem,
     PlayMedia,
 )
+from homeassistant.components.stream import FORMAT_CONTENT_TYPE, HLS_PROVIDER
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
@@ -112,12 +113,17 @@ class EufyMaxMediaSource(MediaSource):
         )
 
     def _camera_item(self, entity_id: str, name: str) -> BrowseMediaSource:
-        """Eine einzelne Kamera als abspielbaren Eintrag."""
+        """Eine einzelne Kamera als abspielbaren Eintrag.
+
+        Der Medientyp muss der HLS-Typ sein, nicht einfach 'video' -
+        sonst versucht der Browser die Wiedergabe mit dem normalen
+        Videoplayer und meldet, dass er das Format nicht kann.
+        """
         return BrowseMediaSource(
             domain=DOMAIN,
             identifier=f"{FOLDER}/{entity_id}",
             media_class=MediaClass.VIDEO,
-            media_content_type=MediaType.VIDEO,
+            media_content_type=FORMAT_CONTENT_TYPE[HLS_PROVIDER],
             title=name,
             can_play=True,
             can_expand=False,
