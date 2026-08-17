@@ -89,6 +89,35 @@ stop_stream:
   name: Livestream stoppen
   description: Stoppt den Livestream aller Kameras sofort.
 
+start_camera_stream:
+  name: Livestream einer Kamera starten
+  description: >-
+    Schaltet nur die gewaehlte Kamera auf. Empfohlen, wenn du eine einzelne
+    Kamera ansehen willst - Eufy laesst nicht beliebig viele Livestreams
+    gleichzeitig zu.
+  target:
+    entity:
+      integration: eufy_max
+      domain: camera
+  fields:
+    duration:
+      name: Dauer
+      description: Laufzeit in Sekunden. Leer lassen fuer die eingestellte Standarddauer.
+      required: false
+      selector:
+        number:
+          min: 10
+          max: 1800
+          unit_of_measurement: s
+
+stop_camera_stream:
+  name: Livestream einer Kamera stoppen
+  description: Schaltet nur die gewaehlte Kamera wieder ab.
+  target:
+    entity:
+      integration: eufy_max
+      domain: camera
+
 set_guard_mode:
   name: Guard Mode setzen
   description: Setzt den Eufy Guard Mode direkt. Ohne Ziel gilt er fuer alle Kameras.

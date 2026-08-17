@@ -106,6 +106,8 @@ HUB_IDENTIFIER = "eufy_max_hub"
 
 SERVICE_START_STREAM = "start_stream"
 SERVICE_STOP_STREAM = "stop_stream"
+SERVICE_START_CAMERA_STREAM = "start_camera_stream"
+SERVICE_STOP_CAMERA_STREAM = "stop_camera_stream"
 ATTR_DURATION = "duration"
 
 

@@ -104,8 +104,8 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
 
     @property
     def is_streaming(self) -> bool:
-        """Laeuft gerade ein Livebild?"""
-        return bool(self.controller and self.controller.active)
+        """Laeuft gerade ein Livebild fuer DIESE Kamera?"""
+        return bool(self.controller and self.controller.is_active(self.serial))
 
     @property
     def brand(self) -> str:
@@ -121,11 +121,15 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Zusatzinfos fuer Automatisierungen und Fehlersuche."""
         bridge = self.bridge
+        controller = self.controller
         return {
             "serial_number": self.serial,
             "betriebsart": "rtsp" if self._has_rtsp else "p2p",
-            "stream_aktiv": bool(self.controller and self.controller.active),
-            "restzeit_sekunden": self.controller.remaining if self.controller else 0,
+            "stream_aktiv": bool(controller and controller.is_active(self.serial)),
+            "restzeit_sekunden": (
+                controller.remaining_for(self.serial) if controller else 0
+            ),
+            "codec": bridge.codec if bridge else None,
             "rtsp_url": self.get_property(RTSP_URL_PROPERTY),
             "bilder_empfangen": bridge.frames_received if bridge else 0,
             "battery": self.get_property("battery"),
@@ -137,7 +141,7 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
         if not self._has_rtsp:
             return None
 
-        if not (self.controller and self.controller.active):
+        if not (self.controller and self.controller.is_active(self.serial)):
             _LOGGER.debug(
                 "Streamanfrage fuer %s abgelehnt - Livestream ist aus", self.serial
             )
@@ -157,7 +161,9 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
         if bridge is not None and bridge.latest_image:
             return bridge.latest_image
 
-        if self._has_rtsp and self.controller and self.controller.active:
+        if self._has_rtsp and self.controller and self.controller.is_active(
+            self.serial
+        ):
             source = await self.stream_source()
             if source:
                 try:

@@ -37,6 +37,8 @@ from .const import (
     ATTR_GUARD_MODE,
     SERVICE_START_STREAM,
     SERVICE_STOP_STREAM,
+    SERVICE_START_CAMERA_STREAM,
+    SERVICE_STOP_CAMERA_STREAM,
     ATTR_DURATION,
     SIGNAL_DEVICE_UPDATE,
 )
@@ -242,6 +244,45 @@ def _async_register_services(hass: HomeAssistant) -> None:
             {vol.Optional(ATTR_DURATION): vol.All(int, vol.Range(min=10, max=1800))}
         ),
     )
+    async def handle_start_camera_stream(call: ServiceCall) -> None:
+        """Nur die angegebenen Kameras aufschalten."""
+        client = _get_client(hass)
+        duration = call.data.get(ATTR_DURATION)
+        for entity_id in call.data.get("entity_id", []):
+            serial = _serial_from_entity(hass, entity_id)
+            if serial:
+                await client.stream.async_start_one(serial, duration)
+            else:
+                _LOGGER.warning("Keine Kamera zu %s gefunden", entity_id)
+
+    async def handle_stop_camera_stream(call: ServiceCall) -> None:
+        """Nur die angegebenen Kameras abschalten."""
+        client = _get_client(hass)
+        for entity_id in call.data.get("entity_id", []):
+            serial = _serial_from_entity(hass, entity_id)
+            if serial:
+                await client.stream.async_stop_one(serial)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_START_CAMERA_STREAM,
+        handle_start_camera_stream,
+        schema=vol.Schema(
+            {
+                vol.Required("entity_id"): cv.entity_ids,
+                vol.Optional(ATTR_DURATION): vol.All(
+                    int, vol.Range(min=10, max=1800)
+                ),
+            }
+        ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_STOP_CAMERA_STREAM,
+        handle_stop_camera_stream,
+        schema=vol.Schema({vol.Required("entity_id"): cv.entity_ids}),
+    )
+
     async def handle_set_guard_mode(call: ServiceCall) -> None:
         client = _get_client(hass)
         mode = int(call.data[ATTR_GUARD_MODE])

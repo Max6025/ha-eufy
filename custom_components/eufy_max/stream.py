@@ -1,7 +1,8 @@
 """Zentraler Livestream-Controller.
 
-Statt dauerhaft zu streamen werden alle Kameras per Knopfdruck gemeinsam
-gestartet und nach einer einstellbaren Zeit automatisch wieder gestoppt.
+Kameras streamen nicht dauerhaft, sondern werden gezielt aufgeschaltet
+und nach einer einstellbaren Zeit automatisch wieder abgeschaltet - je
+Kamera einzeln oder alle zusammen.
 """
 
 from __future__ import annotations
@@ -37,14 +38,7 @@ CAMERA_HINTS = (
 
 
 def camera_serials(client: EufyMaxClient) -> list[str]:
-    """Alle Seriennummern liefern, die ueberhaupt ein Bild liefern koennen.
-
-    Mehrere Wege, weil kein einzelner zuverlaessig ist: manche Modelle
-    melden eine RTSP-Eigenschaft, andere den Livestream-Befehl. Ganz neue
-    Modelle kennt die Eufy-Bibliothek noch nicht - dann ist die
-    Befehlsliste leer und der Typ unbekannt, und es entscheiden die
-    typischen Kameraeigenschaften.
-    """
+    """Alle Seriennummern liefern, die ueberhaupt ein Bild liefern koennen."""
     serials: list[str] = []
 
     for serial, device in client.devices.items():
@@ -71,101 +65,64 @@ def camera_serials(client: EufyMaxClient) -> list[str]:
 
 
 class StreamController:
-    """Startet und stoppt den Livestream aller Kameras gemeinsam."""
+    """Schaltet Kameras einzeln oder gemeinsam auf.
+
+    Jede Kamera hat ihre eigene Abschaltzeit. Das ist wichtig, weil Eufy
+    nicht beliebig viele Livestreams gleichzeitig zulaesst - wer nur eine
+    Kamera ansehen will, soll nicht alle belegen.
+    """
 
     def __init__(self, hass: HomeAssistant, client: EufyMaxClient) -> None:
         """Controller initialisieren."""
         self.hass = hass
         self.client = client
-        self.active: bool = False
         self.duration: int = DEFAULT_STREAM_DURATION
-        self.ends_at: datetime | None = None
-        self.last_started: datetime | None = None
+
+        # serialNumber -> Abschaltzeitpunkt
+        self.ends_at_map: dict[str, datetime] = {}
         # serialNumber -> laufende P2P-Bruecke
         self.bridges: dict[str, P2PVideoBridge] = {}
-        self._unsub_timer = None
+        self._timers: dict[str, object] = {}
 
+    # ------------------------------------------------------------------
+    # Zustand
     # ------------------------------------------------------------------
 
     @property
+    def active(self) -> bool:
+        """Laeuft irgendeine Kamera?"""
+        return bool(self.ends_at_map)
+
+    @property
+    def ends_at(self) -> datetime | None:
+        """Spaetester Abschaltzeitpunkt ueber alle Kameras."""
+        if not self.ends_at_map:
+            return None
+        return max(self.ends_at_map.values())
+
+    @property
     def remaining(self) -> int:
-        """Restlaufzeit in Sekunden."""
-        if not self.active or self.ends_at is None:
+        """Laengste Restlaufzeit in Sekunden."""
+        end = self.ends_at
+        if end is None:
             return 0
-        delta = (self.ends_at - dt_util.utcnow()).total_seconds()
-        return max(0, int(delta))
+        return max(0, int((end - dt_util.utcnow()).total_seconds()))
 
     @property
     def active_cameras(self) -> list[str]:
         """Seriennummern der Kameras, die gerade laufen."""
-        return camera_serials(self.client) if self.active else []
+        return list(self.ends_at_map)
 
-    # ------------------------------------------------------------------
+    def is_active(self, serial: str) -> bool:
+        """Laeuft diese eine Kamera?"""
+        return serial in self.ends_at_map
 
-    async def async_start(self, duration: int | None = None) -> None:
-        """Alle Kameras starten und Abschaltzeit setzen."""
-        seconds = int(duration or self.duration)
-        serials = camera_serials(self.client)
-
-        if not serials:
-            _LOGGER.warning("Keine streamfaehige Kamera gefunden")
-            return
-
-        # Erst den Zustand setzen, dann starten: die Kamera-Entities
-        # fragen waehrend des Starts schon nach Bildern.
-        self.active = True
-        self.last_started = dt_util.utcnow()
-        self.ends_at = self.last_started + timedelta(seconds=seconds)
-
-        self._cancel_timer()
-        self._unsub_timer = async_call_later(
-            self.hass, seconds, self._async_timer_finished
-        )
-        self._notify()
-
-        # Alle Kameras gleichzeitig starten, nicht nacheinander -
-        # sonst summieren sich die Aufbauzeiten der P2P-Verbindungen.
-        await asyncio.gather(
-            *(self._async_start_camera(serial) for serial in serials),
-            return_exceptions=True,
-        )
-
-        _LOGGER.info(
-            "Livestream fuer %s Kamera(s) gestartet, Abschaltung in %s Sekunden",
-            len(serials),
-            seconds,
-        )
-        self._notify()
-
-    async def async_stop(self) -> None:
-        """Alle Kameras wieder abschalten."""
-        self._cancel_timer()
-
-        await asyncio.gather(
-            *(
-                self._async_stop_camera(serial)
-                for serial in camera_serials(self.client)
-            ),
-            return_exceptions=True,
-        )
-
-        self.active = False
-        self.ends_at = None
-        _LOGGER.info("Livestream aller Kameras gestoppt")
-        self._notify()
-
-    async def async_extend(self, seconds: int) -> None:
-        """Laufenden Stream verlaengern."""
-        if not self.active:
-            await self.async_start(seconds)
-            return
-
-        self.ends_at = dt_util.utcnow() + timedelta(seconds=seconds)
-        self._cancel_timer()
-        self._unsub_timer = async_call_later(
-            self.hass, seconds, self._async_timer_finished
-        )
-        self._notify()
+    def remaining_for(self, serial: str) -> int:
+        """Restlaufzeit einer einzelnen Kamera."""
+        end = self.ends_at_map.get(serial)
+        if end is None:
+            return 0
+        return max(0, int((end - dt_util.utcnow()).total_seconds()))
 
     def set_duration(self, seconds: int) -> None:
         """Neue Standarddauer setzen."""
@@ -173,15 +130,96 @@ class StreamController:
         self._notify()
 
     # ------------------------------------------------------------------
+    # Einzelne Kamera
+    # ------------------------------------------------------------------
+
+    async def async_start_one(
+        self, serial: str, duration: int | None = None
+    ) -> None:
+        """Eine einzelne Kamera aufschalten."""
+        seconds = int(duration or self.duration)
+
+        if serial not in self.client.devices:
+            _LOGGER.warning("Unbekannte Kamera: %s", serial)
+            return
+
+        already = serial in self.ends_at_map
+
+        self.ends_at_map[serial] = dt_util.utcnow() + timedelta(seconds=seconds)
+        self._schedule_stop(serial, seconds)
+        self._notify()
+
+        if not already:
+            await self._async_start_camera(serial)
+            _LOGGER.info(
+                "Livestream fuer %s gestartet, Abschaltung in %s Sekunden",
+                self.client.get_property(serial, "name", serial),
+                seconds,
+            )
+            self._notify()
+
+    async def async_stop_one(self, serial: str) -> None:
+        """Eine einzelne Kamera abschalten."""
+        self._cancel_timer(serial)
+        self.ends_at_map.pop(serial, None)
+        await self._async_stop_camera(serial)
+        self._notify()
+
+    # ------------------------------------------------------------------
+    # Alle Kameras
+    # ------------------------------------------------------------------
+
+    async def async_start(self, duration: int | None = None) -> None:
+        """Alle Kameras aufschalten."""
+        seconds = int(duration or self.duration)
+        serials = camera_serials(self.client)
+
+        if not serials:
+            _LOGGER.warning("Keine streamfaehige Kamera gefunden")
+            return
+
+        _LOGGER.info(
+            "Starte Livestream fuer %s Kameras. Hinweis: Eufy laesst nicht "
+            "beliebig viele Streams gleichzeitig zu - fuer eine einzelne "
+            "Kamera besser eufy_max.start_camera_stream nutzen",
+            len(serials),
+        )
+
+        await asyncio.gather(
+            *(self.async_start_one(serial, seconds) for serial in serials),
+            return_exceptions=True,
+        )
+
+    async def async_stop(self) -> None:
+        """Alle Kameras abschalten."""
+        await asyncio.gather(
+            *(self.async_stop_one(serial) for serial in list(self.ends_at_map)),
+            return_exceptions=True,
+        )
+        # Sicherheitshalber auch verwaiste Bruecken einsammeln.
+        for serial in list(self.bridges):
+            await self._async_stop_camera(serial)
+
+        _LOGGER.info("Livestream aller Kameras gestoppt")
+        self._notify()
+
+    async def async_extend(self, seconds: int) -> None:
+        """Alle laufenden Kameras verlaengern."""
+        if not self.ends_at_map:
+            await self.async_start(seconds)
+            return
+
+        for serial in list(self.ends_at_map):
+            self.ends_at_map[serial] = dt_util.utcnow() + timedelta(seconds=seconds)
+            self._schedule_stop(serial, seconds)
+        self._notify()
+
+    # ------------------------------------------------------------------
+    # Technik je Kamera
+    # ------------------------------------------------------------------
 
     async def _async_start_camera(self, serial: str) -> None:
-        """Eine einzelne Kamera in den Streammodus bringen.
-
-        Standardweg ist die P2P-Bruecke, weil sie bei allen Modellen
-        funktioniert. RTSP wird nur genutzt, wenn es in den Optionen
-        eingeschaltet ist - die von den Kameras gemeldeten RTSP-Adressen
-        stimmen naemlich nicht immer.
-        """
+        """Kamera in den Streammodus bringen."""
         metadata = self.client.get_metadata(serial)
         use_rtsp = getattr(self.client, "rtsp_first", False)
 
@@ -197,15 +235,10 @@ class StreamController:
 
         bridge = P2PVideoBridge(self.hass, self.client, serial)
         self.bridges[serial] = bridge
-
-        # Bewusst ohne Abbruch bei Zeitueberschreitung: manche Kameras
-        # senden erst nach einigen Sekunden ein Vollbild, und vorher kann
-        # ffmpeg nichts liefern. Die Bruecke laeuft weiter und holt das
-        # Bild nach.
         await bridge.async_start()
 
     async def _async_stop_camera(self, serial: str) -> None:
-        """Eine einzelne Kamera wieder abschalten."""
+        """Kamera wieder abschalten."""
         bridge = self.bridges.pop(serial, None)
         if bridge is not None:
             await bridge.async_stop()
@@ -218,19 +251,28 @@ class StreamController:
             elif self.client.get_property(serial, "livestreaming"):
                 await self.client.async_stop_livestream(serial)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Stopp von %s fehlgeschlagen: %s", serial, err)
+            _LOGGER.debug("Stopp von %s: %s", serial, err)
 
-    @callback
-    def _async_timer_finished(self, _now) -> None:
-        """Timer abgelaufen - abschalten."""
-        self._unsub_timer = None
-        self.hass.async_create_task(self.async_stop())
+    # ------------------------------------------------------------------
+    # Timer
+    # ------------------------------------------------------------------
 
-    def _cancel_timer(self) -> None:
-        """Laufenden Timer abbrechen."""
-        if self._unsub_timer is not None:
-            self._unsub_timer()
-            self._unsub_timer = None
+    def _schedule_stop(self, serial: str, seconds: int) -> None:
+        """Abschalttimer fuer eine Kamera setzen."""
+        self._cancel_timer(serial)
+
+        @callback
+        def _finished(_now) -> None:
+            self._timers.pop(serial, None)
+            self.hass.async_create_task(self.async_stop_one(serial))
+
+        self._timers[serial] = async_call_later(self.hass, seconds, _finished)
+
+    def _cancel_timer(self, serial: str) -> None:
+        """Timer einer Kamera abbrechen."""
+        unsub = self._timers.pop(serial, None)
+        if unsub is not None:
+            unsub()
 
     def _notify(self) -> None:
         """Alle betroffenen Entities aktualisieren."""
@@ -238,6 +280,7 @@ class StreamController:
 
     async def async_shutdown(self) -> None:
         """Beim Entladen aufraeumen."""
-        self._cancel_timer()
-        if self.active:
+        for serial in list(self._timers):
+            self._cancel_timer(serial)
+        if self.ends_at_map or self.bridges:
             await self.async_stop()
