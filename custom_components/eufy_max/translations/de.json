@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Eufy Max einrichten",
-        "description": "Adresse des eufy-security-ws Servers. Bei einem Add-on auf dem gleichen System ist das 127.0.0.1:3000.",
+        "description": "Adresse des Eufy Max WS Servers. Der Hostname steht im Add-on-Protokoll, z. B. 8fcbb48c-eufy-max-ws, Port 3000.",
         "data": {
           "host": "Host",
           "port": "Port"

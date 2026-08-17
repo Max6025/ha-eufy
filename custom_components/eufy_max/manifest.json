@@ -9,10 +9,10 @@
     "ffmpeg",
     "stream"
   ],
-  "documentation": "https://github.com/Max6025/eufy_max",
+  "documentation": "https://github.com/Max6025/ha-eufy",
   "integration_type": "hub",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/Max6025/eufy_max/issues",
+  "issue_tracker": "https://github.com/Max6025/ha-eufy/issues",
   "requirements": [],
-  "version": "1.0.2"
+  "version": "1.0.3"
 }

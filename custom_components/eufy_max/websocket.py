@@ -82,6 +82,25 @@ class EufyMaxClient:
             self._async_watchdog(), name="eufy_max_watchdog"
         )
 
+    async def async_test(self) -> str | None:
+        """Nur pruefen, ob der Server antwortet.
+
+        Bewusst ohne start_listening und ohne Metadatenabfrage - das
+        dauert auf schwacher Hardware zu lange fuer den Einrichtungs-
+        dialog und laesst ihn in den Timeout laufen.
+        """
+        session = async_get_clientsession(self.hass)
+        ws = await session.ws_connect(self.url, timeout=10)
+        try:
+            msg = await ws.receive_json(timeout=10)
+        finally:
+            await ws.close()
+
+        if msg.get("type") != "version":
+            raise EufyMaxError(f"Unerwartete Antwort: {msg}")
+
+        return msg.get("serverVersion")
+
     async def async_stop(self) -> None:
         """Verbindung sauber beenden."""
         self._closing = True

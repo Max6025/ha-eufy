@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -22,6 +23,8 @@ from .const import (
     DOMAIN,
 )
 from .websocket import EufyMaxClient
+
+_LOGGER = logging.getLogger(__name__)
 
 SCHEMA = vol.Schema(
     {
@@ -59,14 +62,13 @@ class EufyMaxConfigFlow(ConfigFlow, domain=DOMAIN):
 
         client = EufyMaxClient(self.hass, host, port)
         try:
-            await client.async_start()
-            device_count = len(client.devices)
-            await client.async_stop()
-        except Exception:  # noqa: BLE001
+            await client.async_test()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Add-on unter %s:%s antwortet nicht: %s", host, port, err)
             return self.async_abort(reason="cannot_connect")
 
         return self.async_create_entry(
-            title=f"Eufy Max ({device_count} Geraete)",
+            title="Eufy Max",
             data={CONF_HOST: host, CONF_PORT: port},
         )
 
@@ -85,14 +87,15 @@ class EufyMaxConfigFlow(ConfigFlow, domain=DOMAIN):
 
             client = EufyMaxClient(self.hass, host, port)
             try:
-                await client.async_start()
-                device_count = len(client.devices)
-                await client.async_stop()
-            except Exception:  # noqa: BLE001
+                await client.async_test()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Verbindungstest zu %s:%s fehlgeschlagen: %s", host, port, err
+                )
                 errors["base"] = "cannot_connect"
             else:
                 return self.async_create_entry(
-                    title=f"Eufy Max ({device_count} Geraete)",
+                    title="Eufy Max",
                     data={CONF_HOST: host, CONF_PORT: port},
                 )
 
