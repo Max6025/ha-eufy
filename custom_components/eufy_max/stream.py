@@ -15,6 +15,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CAMERA_DEVICE_TYPES,
     DEFAULT_STREAM_DURATION,
     RTSP_PROPERTY,
     SIGNAL_STREAM_STATE,
@@ -26,14 +27,36 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def camera_serials(client: EufyMaxClient) -> list[str]:
-    """Alle Seriennummern liefern, die ueberhaupt streamen koennen."""
+    """Alle Seriennummern liefern, die ueberhaupt ein Bild liefern koennen.
+
+    Drei Wege, weil kein einzelner zuverlaessig ist: manche Modelle
+    melden eine RTSP-Eigenschaft, andere den Livestream-Befehl, und bei
+    wieder anderen ist die Befehlsliste schlicht leer - dann entscheidet
+    der Geraetetyp.
+    """
     serials: list[str] = []
-    for serial in client.devices:
+
+    for serial, device in client.devices.items():
         metadata = client.get_metadata(serial)
-        if RTSP_PROPERTY in metadata or client.has_command(
-            serial, "device.start_livestream"
-        ):
+        device_type = device.get("type")
+
+        is_camera = (
+            RTSP_PROPERTY in metadata
+            or client.has_command(serial, "start_livestream")
+            or (isinstance(device_type, int) and device_type in CAMERA_DEVICE_TYPES)
+            # Letzte Rueckfallebene: alles, was ein Ereignisbild kennt.
+            or "picture" in metadata
+        )
+
+        if is_camera:
             serials.append(serial)
+        else:
+            _LOGGER.debug(
+                "%s (Typ %s) wird nicht als Kamera behandelt",
+                device.get("name", serial),
+                device_type,
+            )
+
     return serials
 
 
