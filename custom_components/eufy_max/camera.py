@@ -1,8 +1,16 @@
-"""Kamera-Entity - streamt nur, wenn der Controller den Stream freigegeben hat.
+"""Kamera-Entity.
 
-Im Ruhezustand liefert die Kamera nur noch das letzte Ereignisbild. Erst
-wenn der Livestream-Button gedrueckt wurde, gibt stream_source() eine
-Quelle zurueck.
+Zwei Betriebsarten, je nachdem was die Kamera kann:
+
+* Meldet die Kamera eine RTSP-URL, wird diese als Streamquelle genutzt.
+  Home Assistant macht daraus ein flüssiges Livebild.
+* Sonst laeuft der P2P-Datenstrom ueber eine ffmpeg-Bruecke, aus der
+  Einzelbilder kommen. Die Kamera meldet dann bewusst KEINE
+  Stream-Faehigkeit, damit Home Assistant sein Einzelbild-Verfahren
+  nutzt statt einen Stream zu erwarten, den es nicht gibt.
+
+In beiden Faellen gibt es ein Bild nur, wenn der Livestream-Controller
+aktiv ist.
 """
 
 from __future__ import annotations
@@ -45,7 +53,6 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
     """Eine Eufy-Kamera in Home Assistant."""
 
     _attr_name = None  # nutzt den Geraetenamen
-    _attr_supported_features = CameraEntityFeature.STREAM | CameraEntityFeature.ON_OFF
 
     def __init__(self, client: EufyMaxClient, serial: str) -> None:
         """Kamera initialisieren."""
@@ -53,10 +60,30 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
         Camera.__init__(self)
         self._attr_unique_id = f"{serial}_camera"
 
+        # Nur Kameras mit RTSP koennen echtes Streaming. Bei den anderen
+        # darf die Faehigkeit nicht gemeldet werden, sonst kommt
+        # "does not support play stream service".
+        self._has_rtsp = RTSP_PROPERTY in client.get_metadata(serial)
+
+        if self._has_rtsp:
+            self._attr_supported_features = (
+                CameraEntityFeature.STREAM | CameraEntityFeature.ON_OFF
+            )
+        else:
+            self._attr_supported_features = CameraEntityFeature.ON_OFF
+
     @property
     def controller(self):
         """Zentraler Livestream-Controller."""
         return self.client.stream
+
+    @property
+    def bridge(self):
+        """P2P-Bruecke dieser Kamera, falls vorhanden."""
+        controller = self.controller
+        if controller is None:
+            return None
+        return controller.bridges.get(self.serial)
 
     async def async_added_to_hass(self) -> None:
         """Auf Geraete- und Controllerzustand hoeren."""
@@ -74,8 +101,8 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
 
     @property
     def is_streaming(self) -> bool:
-        """Nur streamend, wenn der Controller aktiv ist."""
-        return self.controller.active
+        """Laeuft gerade ein Livebild?"""
+        return bool(self.controller and self.controller.active)
 
     @property
     def brand(self) -> str:
@@ -90,45 +117,44 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Zusatzinfos fuer Automatisierungen und Fehlersuche."""
+        bridge = self.bridge
         return {
             "serial_number": self.serial,
-            "stream_aktiv": self.controller.active,
-            "restzeit_sekunden": self.controller.remaining,
+            "betriebsart": "rtsp" if self._has_rtsp else "p2p",
+            "stream_aktiv": bool(self.controller and self.controller.active),
+            "restzeit_sekunden": self.controller.remaining if self.controller else 0,
             "rtsp_url": self.get_property(RTSP_URL_PROPERTY),
+            "bilder_empfangen": bridge.frames_received if bridge else 0,
             "battery": self.get_property("battery"),
             "wifi_rssi": self.get_property("wifiRssi"),
         }
 
     async def stream_source(self) -> str | None:
-        """Streamquelle nur liefern, wenn der Controller den Stream freigibt.
+        """RTSP-Quelle - nur fuer Kameras, die eine URL melden."""
+        if not self._has_rtsp:
+            return None
 
-        Es gibt nur eine brauchbare Quelle: die RTSP-URL, die die Kamera
-        selbst meldet. Der P2P-Stream von eufy-security-ws kommt als
-        Datenstrom ueber die WebSocket-Verbindung und laesst sich nicht
-        als URL weiterreichen - dafuer braucht es eine Bruecke.
-        """
-        if not self.controller.active:
+        if not (self.controller and self.controller.active):
             _LOGGER.debug(
                 "Streamanfrage fuer %s abgelehnt - Livestream ist aus", self.serial
             )
             return None
 
-        rtsp_url = self.get_property(RTSP_URL_PROPERTY)
-        if rtsp_url:
-            return rtsp_url
-
-        _LOGGER.warning(
-            "%s meldet keine RTSP-URL. Diese Kamera kann nur P2P und "
-            "liefert ohne Bruecke kein Livebild",
-            self.device.get("name", self.serial),
-        )
-        return None
+        return self.get_property(RTSP_URL_PROPERTY)
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
-        """Standbild: bei laufendem Stream live, sonst letztes Ereignisbild."""
-        if self.controller.active:
+        """Einzelbild liefern.
+
+        Bei P2P kommt es aus der Bruecke, bei RTSP aus dem Stream. Ist
+        nichts aktiv, gibt es das letzte Ereignisbild.
+        """
+        bridge = self.bridge
+        if bridge is not None and bridge.latest_image:
+            return bridge.latest_image
+
+        if self._has_rtsp and self.controller and self.controller.active:
             source = await self.stream_source()
             if source:
                 try:

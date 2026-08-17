@@ -19,6 +19,7 @@ from .const import (
     RTSP_PROPERTY,
     SIGNAL_STREAM_STATE,
 )
+from .p2p import P2PVideoBridge
 from .websocket import EufyMaxClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,6 +48,8 @@ class StreamController:
         self.duration: int = DEFAULT_STREAM_DURATION
         self.ends_at: datetime | None = None
         self.last_started: datetime | None = None
+        # serialNumber -> laufende P2P-Bruecke (nur Kameras ohne RTSP)
+        self.bridges: dict[str, P2PVideoBridge] = {}
         self._unsub_timer = None
 
     # ------------------------------------------------------------------
@@ -127,18 +130,41 @@ class StreamController:
     # ------------------------------------------------------------------
 
     async def _async_start_camera(self, serial: str) -> None:
-        """Eine einzelne Kamera in den Streammodus bringen."""
+        """Eine einzelne Kamera in den Streammodus bringen.
+
+        Mit RTSP genuegt es, die Eigenschaft zu setzen - die Kamera macht
+        den Rest selbst. Ohne RTSP wird eine Bruecke gestartet, die den
+        P2P-Datenstrom in Einzelbilder wandelt.
+        """
         metadata = self.client.get_metadata(serial)
-        try:
-            if RTSP_PROPERTY in metadata:
+
+        if RTSP_PROPERTY in metadata:
+            try:
                 await self.client.async_set_property(serial, RTSP_PROPERTY, True)
-            else:
-                await self.client.async_start_livestream(serial)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Start von %s fehlgeschlagen: %s", serial, err)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.error("RTSP fuer %s nicht aktivierbar: %s", serial, err)
+            return
+
+        if serial in self.bridges:
+            return
+
+        bridge = P2PVideoBridge(self.hass, self.client, serial)
+        self.bridges[serial] = bridge
+
+        if not await bridge.async_start():
+            _LOGGER.warning(
+                "P2P-Bruecke fuer %s lieferte kein Bild - wird beendet", serial
+            )
+            await bridge.async_stop()
+            self.bridges.pop(serial, None)
 
     async def _async_stop_camera(self, serial: str) -> None:
         """Eine einzelne Kamera wieder abschalten."""
+        bridge = self.bridges.pop(serial, None)
+        if bridge is not None:
+            await bridge.async_stop()
+            return
+
         metadata = self.client.get_metadata(serial)
         try:
             if RTSP_PROPERTY in metadata:

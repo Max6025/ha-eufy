@@ -47,10 +47,10 @@ class EufyMaxMediaSource(MediaSource):
 
     # ------------------------------------------------------------------
 
-    def _cameras(self) -> list[tuple[str, str]]:
-        """Alle Kamera-Entities dieser Integration mit Anzeigenamen."""
+    def _cameras(self) -> list[tuple[str, str, bool]]:
+        """Kamera-Entities dieser Integration mit Name und Stream-Faehigkeit."""
         registry = er.async_get(self.hass)
-        result: list[tuple[str, str]] = []
+        result: list[tuple[str, str, bool]] = []
 
         for entry in registry.entities.values():
             if entry.platform != DOMAIN or entry.domain != "camera":
@@ -61,7 +61,9 @@ class EufyMaxMediaSource(MediaSource):
                 if state
                 else None
             ) or entry.original_name or entry.entity_id
-            result.append((entry.entity_id, name))
+            # Bit 2 von supported_features ist CameraEntityFeature.STREAM
+            features = state.attributes.get("supported_features", 0) if state else 0
+            result.append((entry.entity_id, name, bool(features & 2)))
 
         return sorted(result, key=lambda item: item[1])
 
@@ -83,8 +85,8 @@ class EufyMaxMediaSource(MediaSource):
                 can_expand=True,
                 children_media_class=MediaClass.VIDEO,
                 children=[
-                    self._camera_item(entity_id, name)
-                    for entity_id, name in self._cameras()
+                    self._camera_item(entity_id, name, can_stream)
+                    for entity_id, name, can_stream in self._cameras()
                 ],
             )
 
@@ -112,18 +114,23 @@ class EufyMaxMediaSource(MediaSource):
             ],
         )
 
-    def _camera_item(self, entity_id: str, name: str) -> BrowseMediaSource:
+    def _camera_item(
+        self, entity_id: str, name: str, can_stream: bool
+    ) -> BrowseMediaSource:
         """Eine einzelne Kamera als abspielbaren Eintrag.
 
-        Der Medientyp muss der HLS-Typ sein, nicht einfach 'video' -
-        sonst versucht der Browser die Wiedergabe mit dem normalen
-        Videoplayer und meldet, dass er das Format nicht kann.
+        Der Medientyp muss zur Betriebsart passen: HLS bei RTSP-Kameras,
+        Einzelbild bei den P2P-Kameras. Sonst greift der Browser zum
+        falschen Player und meldet ein nicht unterstuetztes Format.
         """
+        content_type = (
+            FORMAT_CONTENT_TYPE[HLS_PROVIDER] if can_stream else "image/jpeg"
+        )
         return BrowseMediaSource(
             domain=DOMAIN,
             identifier=f"{FOLDER}/{entity_id}",
             media_class=MediaClass.VIDEO,
-            media_content_type=FORMAT_CONTENT_TYPE[HLS_PROVIDER],
+            media_content_type=content_type,
             title=name,
             can_play=True,
             can_expand=False,
