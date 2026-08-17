@@ -61,6 +61,8 @@ class EufyMaxClient:
         self._futures: dict[str, asyncio.Future] = {}
         self._listeners: list[Callable[[str, str | None], None]] = []
         self._auth_listeners: list[Callable[[str, dict[str, Any]], None]] = []
+        # serialNumber -> Empfaenger fuer rohe P2P-Videodaten
+        self._video_handlers: dict[str, Callable[[bytes], None]] = {}
         # Wird von __init__.py gesetzt: zentraler Livestream-Controller
         self.stream: Any = None
 
@@ -380,6 +382,24 @@ class EufyMaxClient:
             return
 
         if source in ("device", "station") and serial:
+            # Rohe Videodaten des P2P-Streams direkt an die Bruecke geben,
+            # ohne den Umweg ueber den Geraetezustand. Das sind viele
+            # kleine Pakete pro Sekunde.
+            if name == "livestream video data":
+                handler = self._video_handlers.get(serial)
+                if handler is not None:
+                    buffer = event.get("buffer")
+                    data = buffer.get("data") if isinstance(buffer, dict) else None
+                    if data:
+                        try:
+                            handler(bytes(data))
+                        except Exception:  # noqa: BLE001
+                            _LOGGER.debug("Videodaten konnten nicht uebergeben werden")
+                return
+
+            if name == "livestream audio data":
+                return
+
             store = self.devices if source == "device" else self.stations
             target = store.setdefault(serial, {"serialNumber": serial})
 
@@ -581,6 +601,16 @@ class EufyMaxClient:
                 self._listeners.remove(callback)
 
         return remove
+
+    def add_video_handler(
+        self, serial: str, callback: Callable[[bytes], None]
+    ) -> None:
+        """Empfaenger fuer die rohen P2P-Videodaten einer Kamera setzen."""
+        self._video_handlers[serial] = callback
+
+    def remove_video_handler(self, serial: str) -> None:
+        """Empfaenger wieder abmelden."""
+        self._video_handlers.pop(serial, None)
 
     def add_auth_listener(
         self, callback: Callable[[str, dict[str, Any]], None]
