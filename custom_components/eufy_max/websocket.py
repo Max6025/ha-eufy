@@ -65,6 +65,8 @@ class EufyMaxClient:
         self.stream: Any = None
 
         self._runner: asyncio.Task | None = None
+        self._reader: asyncio.Task | None = None
+        self._disconnected = asyncio.Event()
         self._closing: bool = False
 
     # ------------------------------------------------------------------
@@ -107,6 +109,9 @@ class EufyMaxClient:
         if self._runner:
             self._runner.cancel()
             self._runner = None
+        if self._reader:
+            self._reader.cancel()
+            self._reader = None
         if self._ws and not self._ws.closed:
             await self._ws.close()
         self.connected = False
@@ -114,38 +119,43 @@ class EufyMaxClient:
     async def _async_watchdog(self) -> None:
         """Haelt die Verbindung dauerhaft am Leben.
 
-        Genau der Teil, der in anderen Integrationen fehlt: nach einem
-        Abbruch wird mit wachsendem Abstand endlos neu verbunden, statt
-        die Entities dauerhaft auf 'unavailable' stehen zu lassen.
+        Wartet darauf, dass die Leseschleife das Ende der Verbindung
+        meldet, und verbindet dann mit wachsendem Abstand endlos neu,
+        statt die Entities dauerhaft auf 'unavailable' stehen zu lassen.
         """
         delay = RECONNECT_MIN_DELAY
+
         while not self._closing:
-            try:
-                await self._async_listen()
-                delay = RECONNECT_MIN_DELAY
-            except asyncio.CancelledError:
-                raise
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.warning(
-                    "Verbindung zu eufy-security-ws verloren (%s). "
-                    "Neuer Versuch in %s Sekunden",
-                    err,
-                    delay,
-                )
+            await self._disconnected.wait()
 
             if self._closing:
                 return
 
             self.connected = False
             self._notify_all()
+
+            _LOGGER.warning(
+                "Verbindung zu eufy-security-ws verloren. "
+                "Neuer Versuch in %s Sekunden",
+                delay,
+            )
             await asyncio.sleep(delay)
-            delay = min(delay * 2, RECONNECT_MAX_DELAY)
+
+            if self._closing:
+                return
 
             try:
                 await self._async_connect_once()
-                _LOGGER.info("Verbindung zu eufy-security-ws wiederhergestellt")
+            except asyncio.CancelledError:
+                raise
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Reconnect fehlgeschlagen: %s", err)
+                delay = min(delay * 2, RECONNECT_MAX_DELAY)
+                # Erneut ausloesen, damit die Schleife weiterlaeuft.
+                self._disconnected.set()
+            else:
+                delay = RECONNECT_MIN_DELAY
+                _LOGGER.info("Verbindung zu eufy-security-ws wiederhergestellt")
 
     async def _async_connect_once(self) -> None:
         """Eine Verbindung aufbauen, Schema aushandeln, Zustand laden."""
@@ -165,6 +175,14 @@ class EufyMaxClient:
             "eufy-security-ws %s, Schema %s ausgehandelt",
             msg.get("serverVersion"),
             self.schema_version,
+        )
+
+        # WICHTIG: Die Leseschleife muss laufen, BEVOR der erste Befehl
+        # rausgeht. Sonst liest niemand die Antworten und jeder Befehl
+        # laeuft in den Timeout.
+        self._disconnected.clear()
+        self._reader = self.hass.async_create_background_task(
+            self._async_reader(), name="eufy_max_reader"
         )
 
         await self._async_send_command(
@@ -240,25 +258,40 @@ class EufyMaxClient:
     # Nachrichtenschleife
     # ------------------------------------------------------------------
 
-    async def _async_listen(self) -> None:
-        """Eingehende Nachrichten verarbeiten, bis die Verbindung endet."""
-        if self._ws is None:
-            raise EufyMaxError("Keine Verbindung")
+    async def _async_reader(self) -> None:
+        """Eingehende Nachrichten verarbeiten, bis die Verbindung endet.
 
-        async for msg in self._ws:
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                try:
-                    self._handle_message(msg.json())
-                except Exception:  # noqa: BLE001
-                    _LOGGER.exception("Fehler beim Verarbeiten einer Nachricht")
-            elif msg.type in (
-                aiohttp.WSMsgType.CLOSED,
-                aiohttp.WSMsgType.CLOSING,
-                aiohttp.WSMsgType.ERROR,
-            ):
-                break
+        Laeuft als eigener Task ab dem Moment, in dem die Verbindung
+        steht - also auch waehrend der Anmeldebefehle.
+        """
+        try:
+            if self._ws is None:
+                return
 
-        raise EufyMaxError("WebSocket geschlossen")
+            async for msg in self._ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        self._handle_message(msg.json())
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.exception("Fehler beim Verarbeiten einer Nachricht")
+                elif msg.type in (
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.ERROR,
+                ):
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Leseschleife beendet: %s", err)
+        finally:
+            self.connected = False
+            # Wartende Befehle nicht ins Timeout laufen lassen.
+            for future in self._futures.values():
+                if not future.done():
+                    future.set_exception(EufyMaxError("Verbindung verloren"))
+            self._futures.clear()
+            self._disconnected.set()
 
     def _handle_message(self, data: dict[str, Any]) -> None:
         """Eine einzelne Nachricht einsortieren."""
