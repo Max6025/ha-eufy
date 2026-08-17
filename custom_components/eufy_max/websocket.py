@@ -199,21 +199,35 @@ class EufyMaxClient:
         self._notify_all()
 
     async def _async_load_state(self, state: dict[str, Any]) -> None:
-        """Geraete und Stationen aus start_listening uebernehmen."""
+        """Geraete und Stationen aus start_listening uebernehmen.
+
+        Ab Schema 13 liefert der Server in 'devices' und 'stations' nur
+        noch Seriennummern als Strings. Die Eigenschaften muessen dann
+        einzeln per get_properties nachgeladen werden. Aeltere Schemas
+        liefern vollstaendige Objekte - beides wird hier abgedeckt.
+        """
         driver = state.get("driver", {})
         self.driver_connected = bool(driver.get("connected", False))
 
         self.devices = {}
-        for device in state.get("devices", []):
-            serial = device.get("serialNumber")
-            if serial:
-                self.devices[serial] = device
+        for entry in state.get("devices", []):
+            if isinstance(entry, str):
+                self.devices[entry] = {"serialNumber": entry}
+            elif isinstance(entry, dict) and entry.get("serialNumber"):
+                self.devices[entry["serialNumber"]] = entry
 
         self.stations = {}
-        for station in state.get("stations", []):
-            serial = station.get("serialNumber")
-            if serial:
-                self.stations[serial] = station
+        for entry in state.get("stations", []):
+            if isinstance(entry, str):
+                self.stations[entry] = {"serialNumber": entry}
+            elif isinstance(entry, dict) and entry.get("serialNumber"):
+                self.stations[entry["serialNumber"]] = entry
+
+        _LOGGER.debug(
+            "start_listening: %s Geraet(e), %s Station(en)",
+            len(self.devices),
+            len(self.stations),
+        )
 
         if not self.driver_connected:
             _LOGGER.warning(
@@ -224,13 +238,25 @@ class EufyMaxClient:
                 {"command": "driver.connect"}, wait_for_ws=False
             )
 
-        # Metadaten und verfuegbare Befehle je Geraet nachladen. Daraus
-        # werden spaeter die Entities generiert.
+        # Eigenschaften, Metadaten und Befehle je Geraet nachladen.
+        # Daraus werden spaeter die Entities generiert.
         for serial in list(self.devices):
             await self._async_load_device_details(serial)
 
+        for serial in list(self.stations):
+            await self._async_load_station_details(serial)
+
     async def _async_load_device_details(self, serial: str) -> None:
-        """Property-Metadaten und Befehlsliste eines Geraets laden."""
+        """Eigenschaften, Metadaten und Befehlsliste eines Geraets laden."""
+        try:
+            props = await self._async_send_command(
+                {"command": "device.get_properties", "serialNumber": serial},
+                wait_for_ws=False,
+            )
+            self.devices[serial].update(props.get("properties", {}))
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Eigenschaften fuer %s nicht ladbar: %s", serial, err)
+
         try:
             meta = await self._async_send_command(
                 {
@@ -253,6 +279,19 @@ class EufyMaxClient:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Befehle fuer %s nicht ladbar: %s", serial, err)
             self.commands[serial] = []
+
+    async def _async_load_station_details(self, serial: str) -> None:
+        """Eigenschaften einer Station laden - liefert den Guard Mode."""
+        try:
+            props = await self._async_send_command(
+                {"command": "station.get_properties", "serialNumber": serial},
+                wait_for_ws=False,
+            )
+            self.stations[serial].update(props.get("properties", {}))
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Stationseigenschaften fuer %s nicht ladbar: %s", serial, err
+            )
 
     # ------------------------------------------------------------------
     # Nachrichtenschleife
