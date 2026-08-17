@@ -8,17 +8,14 @@
           "host": "Host",
           "port": "Port"
         }
-      },
-      "hassio_confirm": {
-        "title": "Eufy Max WS gefunden",
-        "description": "Das Add-on Eufy Max WS wurde unter {addon} gefunden. Jetzt einrichten?"
       }
     },
     "error": {
       "cannot_connect": "Verbindung fehlgeschlagen. Laeuft das Add-on und ist der Port richtig?"
     },
     "abort": {
-      "already_configured": "Dieser Server ist bereits eingerichtet."
+      "already_configured": "Dieser Server ist bereits eingerichtet.",
+      "cannot_connect": "Das Add-on wurde gefunden, antwortet aber nicht. Laeuft es?"
     }
   },
   "options": {

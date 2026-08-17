@@ -43,7 +43,12 @@ class EufyMaxConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_hassio(
         self, discovery_info: HassioServiceInfo
     ) -> FlowResult:
-        """Das eigene Add-on hat sich gemeldet - nichts mehr eintippen."""
+        """Das eigene Add-on hat sich gemeldet - direkt einrichten.
+
+        Bewusst ohne Bestaetigungsdialog: ein haengender Discovery-Flow
+        blockiert sonst auch das manuelle Hinzufuegen mit
+        already_in_progress.
+        """
         host = discovery_info.config.get(CONF_HOST)
         port = discovery_info.config.get(CONF_PORT, DEFAULT_PORT)
 
@@ -52,44 +57,17 @@ class EufyMaxConfigFlow(ConfigFlow, domain=DOMAIN):
             updates={CONF_HOST: host, CONF_PORT: port}
         )
 
-        self._discovered = {CONF_HOST: host, CONF_PORT: port}
-        self.context["title_placeholders"] = {"name": "Eufy Max WS Add-on"}
-        return await self.async_step_hassio_confirm()
+        client = EufyMaxClient(self.hass, host, port)
+        try:
+            await client.async_start()
+            device_count = len(client.devices)
+            await client.async_stop()
+        except Exception:  # noqa: BLE001
+            return self.async_abort(reason="cannot_connect")
 
-    async def async_step_hassio_confirm(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Kurz bestaetigen lassen, dann fertig."""
-        assert self._discovered is not None
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            client = EufyMaxClient(
-                self.hass,
-                self._discovered[CONF_HOST],
-                self._discovered[CONF_PORT],
-            )
-            try:
-                await client.async_start()
-                device_count = len(client.devices)
-                await client.async_stop()
-            except Exception:  # noqa: BLE001
-                errors["base"] = "cannot_connect"
-            else:
-                return self.async_create_entry(
-                    title=f"Eufy Max ({device_count} Geraete)",
-                    data=self._discovered,
-                )
-
-        # Ohne data_schema rendert HA zwar das Formular, der OK-Knopf
-        # sendet aber nichts zurueck. Ein leeres Schema ist Pflicht.
-        return self.async_show_form(
-            step_id="hassio_confirm",
-            data_schema=vol.Schema({}),
-            description_placeholders={
-                "addon": f"{self._discovered[CONF_HOST]}:{self._discovered[CONF_PORT]}"
-            },
-            errors=errors,
+        return self.async_create_entry(
+            title=f"Eufy Max ({device_count} Geraete)",
+            data={CONF_HOST: host, CONF_PORT: port},
         )
 
     async def async_step_user(
