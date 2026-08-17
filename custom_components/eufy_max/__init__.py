@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -77,7 +78,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Captcha oder 2FA-Anfrage sichtbar machen."""
         if event_name == "captcha request":
             captcha_id = event.get("captchaId", "")
-            hass.components.persistent_notification.async_create(
+            persistent_notification.async_create(
+                hass,
                 "Eufy verlangt ein Captcha.\n\n"
                 f"Captcha-ID: `{captcha_id}`\n\n"
                 "Bild oeffnen, Code ablesen und den Service "
@@ -87,7 +89,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 notification_id=f"{DOMAIN}_captcha",
             )
         elif event_name == "verify code":
-            hass.components.persistent_notification.async_create(
+            persistent_notification.async_create(
+                hass,
                 "Eufy hat einen 2FA-Code per Mail geschickt.\n\n"
                 "Service `eufy_max.set_verify_code` mit dem Code aufrufen.",
                 title="Eufy Max: 2FA-Code noetig",
@@ -149,12 +152,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
         await client.async_set_captcha(
             call.data[ATTR_CAPTCHA_ID], call.data[ATTR_CAPTCHA]
         )
-        hass.components.persistent_notification.async_dismiss(f"{DOMAIN}_captcha")
+        persistent_notification.async_dismiss(hass, f"{DOMAIN}_captcha")
 
     async def handle_set_verify_code(call: ServiceCall) -> None:
         client = _get_client(hass)
         await client.async_set_verify_code(call.data[ATTR_VERIFY_CODE])
-        hass.components.persistent_notification.async_dismiss(f"{DOMAIN}_verify")
+        persistent_notification.async_dismiss(hass, f"{DOMAIN}_verify")
 
     async def handle_set_property(call: ServiceCall) -> None:
         client = _get_client(hass)
@@ -228,9 +231,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, SERVICE_RECONNECT, handle_reconnect)
     hass.services.async_register(
         DOMAIN,
-        SERVICE_SET_GUARD_MODE,
-    ATTR_GUARD_MODE,
-    SERVICE_START_STREAM,
+        SERVICE_START_STREAM,
         handle_start_stream,
         schema=vol.Schema(
             {vol.Optional(ATTR_DURATION): vol.All(int, vol.Range(min=10, max=1800))}
