@@ -82,6 +82,10 @@ class StreamController:
         self.ends_at_map: dict[str, datetime] = {}
         # serialNumber -> laufende P2P-Bruecke
         self.bridges: dict[str, P2PVideoBridge] = {}
+        # Kameras, deren Livestream die Bibliothek ablehnt. Fuer die gibt
+        # es nur das letzte Ereignisbild - erneute Versuche erzeugen nur
+        # Fehler im Protokoll.
+        self.unsupported: set[str] = set()
         self._timers: dict[str, object] = {}
 
     # ------------------------------------------------------------------
@@ -123,6 +127,10 @@ class StreamController:
         if end is None:
             return 0
         return max(0, int((end - dt_util.utcnow()).total_seconds()))
+
+    def supports_livestream(self, serial: str) -> bool:
+        """Kann diese Kamera ueberhaupt einen Livestream liefern?"""
+        return serial not in self.unsupported
 
     def set_duration(self, seconds: int) -> None:
         """Neue Standarddauer setzen."""
@@ -233,9 +241,20 @@ class StreamController:
         if serial in self.bridges:
             return
 
+        if serial in self.unsupported:
+            _LOGGER.debug(
+                "%s kann keinen Livestream - es bleibt beim Ereignisbild",
+                serial,
+            )
+            return
+
         bridge = P2PVideoBridge(self.hass, self.client, serial)
         self.bridges[serial] = bridge
         await bridge.async_start()
+
+        if not bridge.supported:
+            self.unsupported.add(serial)
+            self.bridges.pop(serial, None)
 
     async def _async_stop_camera(self, serial: str) -> None:
         """Kamera wieder abschalten."""

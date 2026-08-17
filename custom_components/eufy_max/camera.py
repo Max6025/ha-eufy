@@ -22,6 +22,7 @@ from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -67,6 +68,10 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
         self._has_rtsp = getattr(client, "rtsp_first", False) and (
             RTSP_PROPERTY in client.get_metadata(serial)
         )
+
+        # Letztes Ereignisbild, damit die Kachel nicht schwarz bleibt.
+        self._event_image: bytes | None = None
+        self._event_image_url: str | None = None
 
         if self._has_rtsp:
             self._attr_supported_features = (
@@ -130,6 +135,9 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
                 controller.remaining_for(self.serial) if controller else 0
             ),
             "codec": bridge.codec if bridge else None,
+            "livestream_unterstuetzt": bool(
+                controller is None or controller.supports_livestream(self.serial)
+            ),
             "rtsp_url": self.get_property(RTSP_URL_PROPERTY),
             "bilder_empfangen": bridge.frames_received if bridge else 0,
             "battery": self.get_property("battery"),
@@ -188,7 +196,43 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
                 return bytes(data["data"])
             if isinstance(data, str):
                 return base64.b64decode(data)
-        return None
+
+        return await self._async_event_image()
+
+    async def _async_event_image(self) -> bytes | None:
+        """Letztes Ereignisbild aus der Eufy-Cloud holen.
+
+        Fuer Kameras, die keinen Livestream koennen, ist das das einzige
+        Bild, das es gibt - dafuer immerhin ein aktuelles bei jeder
+        Bewegung. Es wird zwischengespeichert, solange die URL gleich
+        bleibt.
+        """
+        url = self.get_property("pictureUrl")
+        if not url or not isinstance(url, str):
+            return self._event_image
+
+        if url == self._event_image_url and self._event_image:
+            return self._event_image
+
+        try:
+            session = async_get_clientsession(self.hass)
+            async with session.get(url, timeout=15) as response:
+                if response.status == 200:
+                    self._event_image = await response.read()
+                    self._event_image_url = url
+                    _LOGGER.debug(
+                        "Neues Ereignisbild fuer %s geladen", self.serial
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Ereignisbild fuer %s: HTTP %s",
+                        self.serial,
+                        response.status,
+                    )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Ereignisbild fuer %s nicht ladbar: %s", self.serial, err)
+
+        return self._event_image
 
     async def async_turn_on(self) -> None:
         """Kamera einschalten."""

@@ -63,6 +63,9 @@ class P2PVideoBridge:
         self.latest_image: bytes | None = None
         self.frames_received: int = 0
         self.codec: str | None = None
+        # Wird False, wenn die Kamera den Livestream-Befehl ablehnt -
+        # bei Modellen, die eufy-security-client noch nicht kennt.
+        self.supported: bool = True
 
         self._process: asyncio.subprocess.Process | None = None
         self._output_task: asyncio.Task | None = None
@@ -92,10 +95,20 @@ class P2PVideoBridge:
         try:
             await self.client.async_start_livestream(self.serial)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error(
-                "Livestream fuer %s nicht startbar: %s", self.serial, err
-            )
-            await self.async_stop()
+            text = str(err)
+            if "ot_supported" in text or "NotSupported" in text:
+                self.supported = False
+                _LOGGER.warning(
+                    "%s unterstuetzt keinen Livestream ueber eufy-security-client. "
+                    "Es wird nur das letzte Ereignisbild angezeigt",
+                    self.serial,
+                )
+            else:
+                _LOGGER.error(
+                    "Livestream fuer %s nicht startbar: %s", self.serial, err
+                )
+            # Keinen Stopp-Befehl senden - es laeuft ja nichts.
+            await self.async_stop(request_stop=False)
             return False
 
         _LOGGER.info("P2P-Bruecke fuer %s wartet auf Videodaten", self.serial)
@@ -133,11 +146,11 @@ class P2PVideoBridge:
                 MAX_RETRIES,
             )
 
-    async def async_stop(self) -> None:
+    async def async_stop(self, request_stop: bool = True) -> None:
         """Alles wieder abbauen."""
         self.client.remove_video_handler(self.serial)
 
-        if self.running:
+        if self.running and request_stop:
             try:
                 await self.client.async_stop_livestream(self.serial)
             except Exception as err:  # noqa: BLE001
