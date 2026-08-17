@@ -25,14 +25,24 @@ from .websocket import EufyMaxClient
 
 _LOGGER = logging.getLogger(__name__)
 
+# Eigenschaften, die es praktisch nur bei Kameras gibt. Damit werden
+# auch Modelle erkannt, die die Eufy-Bibliothek noch nicht kennt.
+CAMERA_HINTS = (
+    "picture",
+    "watermark",
+    "videoStreamingQuality",
+    "motionDetection",
+)
+
 
 def camera_serials(client: EufyMaxClient) -> list[str]:
     """Alle Seriennummern liefern, die ueberhaupt ein Bild liefern koennen.
 
-    Drei Wege, weil kein einzelner zuverlaessig ist: manche Modelle
-    melden eine RTSP-Eigenschaft, andere den Livestream-Befehl, und bei
-    wieder anderen ist die Befehlsliste schlicht leer - dann entscheidet
-    der Geraetetyp.
+    Mehrere Wege, weil kein einzelner zuverlaessig ist: manche Modelle
+    melden eine RTSP-Eigenschaft, andere den Livestream-Befehl. Ganz neue
+    Modelle kennt die Eufy-Bibliothek noch nicht - dann ist die
+    Befehlsliste leer und der Typ unbekannt, und es entscheiden die
+    typischen Kameraeigenschaften.
     """
     serials: list[str] = []
 
@@ -44,8 +54,7 @@ def camera_serials(client: EufyMaxClient) -> list[str]:
             RTSP_PROPERTY in metadata
             or client.has_command(serial, "start_livestream")
             or (isinstance(device_type, int) and device_type in CAMERA_DEVICE_TYPES)
-            # Letzte Rueckfallebene: alles, was ein Ereignisbild kennt.
-            or "picture" in metadata
+            or any(prop in metadata for prop in CAMERA_HINTS)
         )
 
         if is_camera:
@@ -71,7 +80,7 @@ class StreamController:
         self.duration: int = DEFAULT_STREAM_DURATION
         self.ends_at: datetime | None = None
         self.last_started: datetime | None = None
-        # serialNumber -> laufende P2P-Bruecke (nur Kameras ohne RTSP)
+        # serialNumber -> laufende P2P-Bruecke
         self.bridges: dict[str, P2PVideoBridge] = {}
         self._unsub_timer = None
 
@@ -101,9 +110,8 @@ class StreamController:
             _LOGGER.warning("Keine streamfaehige Kamera gefunden")
             return
 
-        for serial in serials:
-            await self._async_start_camera(serial)
-
+        # Erst den Zustand setzen, dann starten: die Kamera-Entities
+        # fragen waehrend des Starts schon nach Bildern.
         self.active = True
         self.last_started = dt_util.utcnow()
         self.ends_at = self.last_started + timedelta(seconds=seconds)
@@ -112,6 +120,10 @@ class StreamController:
         self._unsub_timer = async_call_later(
             self.hass, seconds, self._async_timer_finished
         )
+        self._notify()
+
+        for serial in serials:
+            await self._async_start_camera(serial)
 
         _LOGGER.info(
             "Livestream fuer %s Kamera(s) gestartet, Abschaltung in %s Sekunden",
@@ -155,13 +167,15 @@ class StreamController:
     async def _async_start_camera(self, serial: str) -> None:
         """Eine einzelne Kamera in den Streammodus bringen.
 
-        Mit RTSP genuegt es, die Eigenschaft zu setzen - die Kamera macht
-        den Rest selbst. Ohne RTSP wird eine Bruecke gestartet, die den
-        P2P-Datenstrom in Einzelbilder wandelt.
+        Standardweg ist die P2P-Bruecke, weil sie bei allen Modellen
+        funktioniert. RTSP wird nur genutzt, wenn es in den Optionen
+        eingeschaltet ist - die von den Kameras gemeldeten RTSP-Adressen
+        stimmen naemlich nicht immer.
         """
         metadata = self.client.get_metadata(serial)
+        use_rtsp = getattr(self.client, "rtsp_first", False)
 
-        if RTSP_PROPERTY in metadata:
+        if use_rtsp and RTSP_PROPERTY in metadata:
             try:
                 await self.client.async_set_property(serial, RTSP_PROPERTY, True)
             except Exception as err:  # noqa: BLE001
@@ -174,12 +188,11 @@ class StreamController:
         bridge = P2PVideoBridge(self.hass, self.client, serial)
         self.bridges[serial] = bridge
 
-        if not await bridge.async_start():
-            _LOGGER.warning(
-                "P2P-Bruecke fuer %s lieferte kein Bild - wird beendet", serial
-            )
-            await bridge.async_stop()
-            self.bridges.pop(serial, None)
+        # Bewusst ohne Abbruch bei Zeitueberschreitung: manche Kameras
+        # senden erst nach einigen Sekunden ein Vollbild, und vorher kann
+        # ffmpeg nichts liefern. Die Bruecke laeuft weiter und holt das
+        # Bild nach.
+        await bridge.async_start()
 
     async def _async_stop_camera(self, serial: str) -> None:
         """Eine einzelne Kamera wieder abschalten."""

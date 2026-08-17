@@ -60,10 +60,13 @@ class EufyMaxCamera(EufyMaxEntity, Camera):
         Camera.__init__(self)
         self._attr_unique_id = f"{serial}_camera"
 
-        # Nur Kameras mit RTSP koennen echtes Streaming. Bei den anderen
-        # darf die Faehigkeit nicht gemeldet werden, sonst kommt
+        # Nur Kameras mit RTSP koennen echtes Streaming - und auch nur,
+        # wenn RTSP in den Optionen eingeschaltet ist. Sonst darf die
+        # Faehigkeit nicht gemeldet werden, sonst kommt
         # "does not support play stream service".
-        self._has_rtsp = RTSP_PROPERTY in client.get_metadata(serial)
+        self._has_rtsp = getattr(client, "rtsp_first", False) and (
+            RTSP_PROPERTY in client.get_metadata(serial)
+        )
 
         if self._has_rtsp:
             self._attr_supported_features = (

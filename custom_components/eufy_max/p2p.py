@@ -25,7 +25,9 @@ JPEG_END = b"\xff\xd9"
 OUTPUT_FPS = 4
 JPEG_QUALITY = 6
 
-FIRST_FRAME_TIMEOUT = 30
+# Der P2P-Strom beginnt mitten im Bild. ffmpeg muss auf das naechste
+# Vollbild warten, das kann je nach Kamera etwas dauern.
+FIRST_FRAME_TIMEOUT = 45
 MAX_BUFFER = 4_000_000
 
 
@@ -63,10 +65,16 @@ class P2PVideoBridge:
                 binary,
                 "-hide_banner",
                 "-loglevel", "error",
-                "-fflags", "nobuffer",
+                # Der Strom beginnt mitten drin: Fehler am Anfang
+                # ignorieren und auf das naechste Vollbild warten.
+                "-err_detect", "ignore_err",
+                "-fflags", "nobuffer+discardcorrupt+genpts",
                 "-flags", "low_delay",
+                "-analyzeduration", "10000000",
+                "-probesize", "5000000",
                 "-f", "h264",
                 "-i", "pipe:0",
+                "-an",
                 "-vf", f"fps={OUTPUT_FPS}",
                 "-q:v", str(JPEG_QUALITY),
                 "-f", "image2pipe",
@@ -101,13 +109,15 @@ class P2PVideoBridge:
             await self.async_stop()
             return False
 
-        # Auf das erste Bild warten - der P2P-Aufbau dauert einige Sekunden.
+        # Auf das erste Bild warten - der P2P-Aufbau dauert einige
+        # Sekunden. Kommt keins, laeuft die Bruecke trotzdem weiter und
+        # liefert nach, sobald ein Vollbild eintrifft.
         try:
             async with asyncio.timeout(FIRST_FRAME_TIMEOUT):
                 await self._first_frame.wait()
         except TimeoutError:
             _LOGGER.warning(
-                "Kein Bild von %s innerhalb von %s Sekunden",
+                "Noch kein Bild von %s nach %s Sekunden - Bruecke laeuft weiter",
                 self.serial,
                 FIRST_FRAME_TIMEOUT,
             )

@@ -22,6 +22,7 @@ from .const import (
     ATTR_VERIFY_CODE,
     CONF_HOST,
     CONF_PORT,
+    CONF_RTSP_FIRST,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DOMAIN,
@@ -64,6 +65,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Zentraler Livestream-Controller haengt am Client, damit alle
     # Plattformen ihn ueber client.stream erreichen.
     client.stream = StreamController(hass, client)
+
+    # Standard ist der P2P-Weg: die von den Kameras gemeldeten
+    # RTSP-Adressen stimmen nicht immer, der P2P-Strom dagegen schon.
+    client.rtsp_first = entry.options.get(CONF_RTSP_FIRST, False)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = client
 
