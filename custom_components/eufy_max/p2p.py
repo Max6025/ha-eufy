@@ -32,6 +32,12 @@ JPEG_QUALITY = 6
 MAX_BUFFER = 4_000_000
 MAX_PENDING = 2_000_000
 
+# Manche Kameras schliessen ihre P2P-Verbindung zum Stromsparen. Der
+# erste Startbefehl weckt sie nur, geliefert wird erst nach einem
+# zweiten. Deshalb wird der Befehl wiederholt, solange nichts ankommt.
+RETRY_AFTER = 12
+MAX_RETRIES = 4
+
 # Codecnamen aus den Paketen -> Eingabeformat fuer ffmpeg
 CODEC_FORMATS = {
     "H264": "h264",
@@ -60,7 +66,9 @@ class P2PVideoBridge:
 
         self._process: asyncio.subprocess.Process | None = None
         self._output_task: asyncio.Task | None = None
+        self._retry_task: asyncio.Task | None = None
         self._starting: bool = False
+        self._packets: int = 0
         self._first_frame = asyncio.Event()
         self._buffer = bytearray()
         self._pending = bytearray()
@@ -75,6 +83,7 @@ class P2PVideoBridge:
         self.running = True
         self._first_frame.clear()
         self.frames_received = 0
+        self._packets = 0
         self._buffer.clear()
         self._pending.clear()
 
@@ -90,7 +99,39 @@ class P2PVideoBridge:
             return False
 
         _LOGGER.info("P2P-Bruecke fuer %s wartet auf Videodaten", self.serial)
+
+        # Wiederholung anstossen, falls keine Daten kommen.
+        self._retry_task = self.hass.async_create_background_task(
+            self._async_retry_loop(), name=f"eufy_max_retry_{self.serial}"
+        )
         return True
+
+    async def _async_retry_loop(self) -> None:
+        """Startbefehl wiederholen, solange keine Videodaten ankommen."""
+        for versuch in range(1, MAX_RETRIES + 1):
+            await asyncio.sleep(RETRY_AFTER)
+
+            if not self.running or self._packets > 0:
+                return
+
+            _LOGGER.warning(
+                "Keine Videodaten von %s - Startbefehl wird wiederholt (%s/%s)",
+                self.serial,
+                versuch,
+                MAX_RETRIES,
+            )
+            try:
+                await self.client.async_start_livestream(self.serial)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Wiederholung fuer %s: %s", self.serial, err)
+
+        if self._packets == 0:
+            _LOGGER.error(
+                "%s liefert auch nach %s Versuchen keine Videodaten. "
+                "Die Kamera nimmt den Livestream-Befehl nicht an",
+                self.serial,
+                MAX_RETRIES,
+            )
 
     async def async_stop(self) -> None:
         """Alles wieder abbauen."""
@@ -104,6 +145,10 @@ class P2PVideoBridge:
 
         self.running = False
         self._starting = False
+
+        if self._retry_task:
+            self._retry_task.cancel()
+            self._retry_task = None
 
         if self._output_task:
             self._output_task.cancel()
@@ -133,6 +178,14 @@ class P2PVideoBridge:
         """Ein Videopaket verarbeiten."""
         if not self.running:
             return
+
+        self._packets += 1
+        if self._packets == 1:
+            _LOGGER.info(
+                "Erste Videodaten von %s empfangen (Codec %s)",
+                self.serial,
+                codec or "unbekannt",
+            )
 
         # Noch kein ffmpeg: Paket zwischenspeichern und Start anstossen.
         if self._process is None:
