@@ -61,10 +61,13 @@ RTSP_PROPERTY = "rtspStream"
 RTSP_URL_PROPERTY = "rtspStreamUrl"
 
 # Geraetetypen, die als Kamera behandelt werden.
+# Die 10xxx-Reihe kennt die Eufy-Bibliothek teilweise noch nicht,
+# darunter 10037 (T814X).
 CAMERA_DEVICE_TYPES = {
     0, 1, 2, 3, 4, 5, 7, 8, 9, 14, 15, 16, 18, 19, 23, 24, 30, 31,
     34, 35, 37, 38, 39, 44, 45, 46, 47, 48, 50, 51, 52, 60, 61, 62,
     87, 88, 90, 91, 93, 94, 100, 101, 102, 104, 110, 131, 132, 133,
+    10005, 10008, 10009, 10010, 10011, 10035, 10036, 10037, 10038,
 }
 
 SERVICE_SET_CAPTCHA = "set_captcha"

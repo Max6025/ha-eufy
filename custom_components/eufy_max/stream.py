@@ -6,6 +6,7 @@ gestartet und nach einer einstellbaren Zeit automatisch wieder gestoppt.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -122,8 +123,12 @@ class StreamController:
         )
         self._notify()
 
-        for serial in serials:
-            await self._async_start_camera(serial)
+        # Alle Kameras gleichzeitig starten, nicht nacheinander -
+        # sonst summieren sich die Aufbauzeiten der P2P-Verbindungen.
+        await asyncio.gather(
+            *(self._async_start_camera(serial) for serial in serials),
+            return_exceptions=True,
+        )
 
         _LOGGER.info(
             "Livestream fuer %s Kamera(s) gestartet, Abschaltung in %s Sekunden",
@@ -136,8 +141,13 @@ class StreamController:
         """Alle Kameras wieder abschalten."""
         self._cancel_timer()
 
-        for serial in camera_serials(self.client):
-            await self._async_stop_camera(serial)
+        await asyncio.gather(
+            *(
+                self._async_stop_camera(serial)
+                for serial in camera_serials(self.client)
+            ),
+            return_exceptions=True,
+        )
 
         self.active = False
         self.ends_at = None

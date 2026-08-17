@@ -62,7 +62,7 @@ class EufyMaxClient:
         self._listeners: list[Callable[[str, str | None], None]] = []
         self._auth_listeners: list[Callable[[str, dict[str, Any]], None]] = []
         # serialNumber -> Empfaenger fuer rohe P2P-Videodaten
-        self._video_handlers: dict[str, Callable[[bytes], None]] = {}
+        self._video_handlers: dict[str, Callable[[bytes, str | None], None]] = {}
         # Wird von __init__.py gesetzt: zentraler Livestream-Controller
         self.stream: Any = None
 
@@ -391,8 +391,12 @@ class EufyMaxClient:
                     buffer = event.get("buffer")
                     data = buffer.get("data") if isinstance(buffer, dict) else None
                     if data:
+                        # Der Codec steht in jedem Paket mit drin und
+                        # entscheidet, wie ffmpeg gestartet werden muss.
+                        metadata = event.get("metadata") or {}
+                        codec = metadata.get("videoCodec")
                         try:
-                            handler(bytes(data))
+                            handler(bytes(data), codec)
                         except Exception:  # noqa: BLE001
                             _LOGGER.debug("Videodaten konnten nicht uebergeben werden")
                 return
@@ -603,7 +607,7 @@ class EufyMaxClient:
         return remove
 
     def add_video_handler(
-        self, serial: str, callback: Callable[[bytes], None]
+        self, serial: str, callback: Callable[[bytes, str | None], None]
     ) -> None:
         """Empfaenger fuer die rohen P2P-Videodaten einer Kamera setzen."""
         self._video_handlers[serial] = callback

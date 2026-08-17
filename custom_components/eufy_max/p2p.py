@@ -1,9 +1,13 @@
 """Bruecke vom P2P-Livestream zu einem Bild, das Home Assistant anzeigen kann.
 
-Kameras ohne RTSP liefern ihr Video nur als P2P-Datenstrom ueber die
-WebSocket-Verbindung - roher H.264, keine URL. Diese Bruecke schiebt
-den Datenstrom in ein ffmpeg und holt am anderen Ende Einzelbilder
-heraus. Home Assistant setzt daraus ein fortlaufendes Livebild zusammen.
+Kameras ohne brauchbares RTSP liefern ihr Video nur als P2P-Datenstrom
+ueber die WebSocket-Verbindung - rohes H.264 oder H.265, keine URL.
+Diese Bruecke schiebt den Datenstrom in ein ffmpeg und holt am anderen
+Ende Einzelbilder heraus.
+
+Wichtig: ffmpeg wird erst gestartet, wenn das erste Videopaket da ist.
+Erst dann ist bekannt, welchen Codec die Kamera benutzt - und ein
+H.265-Strom durch einen H.264-Decoder ergibt schlicht nichts.
 """
 
 from __future__ import annotations
@@ -25,10 +29,17 @@ JPEG_END = b"\xff\xd9"
 OUTPUT_FPS = 4
 JPEG_QUALITY = 6
 
-# Der P2P-Strom beginnt mitten im Bild. ffmpeg muss auf das naechste
-# Vollbild warten, das kann je nach Kamera etwas dauern.
-FIRST_FRAME_TIMEOUT = 45
 MAX_BUFFER = 4_000_000
+MAX_PENDING = 2_000_000
+
+# Codecnamen aus den Paketen -> Eingabeformat fuer ffmpeg
+CODEC_FORMATS = {
+    "H264": "h264",
+    "AVC": "h264",
+    "H265": "hevc",
+    "HEVC": "hevc",
+    "UNKNOWN": "h264",
+}
 
 
 class P2PVideoBridge:
@@ -45,59 +56,28 @@ class P2PVideoBridge:
         self.running: bool = False
         self.latest_image: bytes | None = None
         self.frames_received: int = 0
+        self.codec: str | None = None
 
         self._process: asyncio.subprocess.Process | None = None
         self._output_task: asyncio.Task | None = None
+        self._starting: bool = False
         self._first_frame = asyncio.Event()
         self._buffer = bytearray()
+        self._pending = bytearray()
 
     # ------------------------------------------------------------------
 
     async def async_start(self) -> bool:
-        """ffmpeg starten und den Livestream anfordern."""
+        """Livestream anfordern. ffmpeg folgt beim ersten Paket."""
         if self.running:
             return True
-
-        binary = get_ffmpeg_manager(self.hass).binary
-
-        try:
-            self._process = await asyncio.create_subprocess_exec(
-                binary,
-                "-hide_banner",
-                "-loglevel", "error",
-                # Der Strom beginnt mitten drin: Fehler am Anfang
-                # ignorieren und auf das naechste Vollbild warten.
-                "-err_detect", "ignore_err",
-                "-fflags", "nobuffer+discardcorrupt+genpts",
-                "-flags", "low_delay",
-                "-analyzeduration", "10000000",
-                "-probesize", "5000000",
-                "-f", "h264",
-                "-i", "pipe:0",
-                "-an",
-                "-vf", f"fps={OUTPUT_FPS}",
-                "-q:v", str(JPEG_QUALITY),
-                "-f", "image2pipe",
-                "-vcodec", "mjpeg",
-                "pipe:1",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("ffmpeg konnte nicht gestartet werden: %s", err)
-            return False
 
         self.running = True
         self._first_frame.clear()
         self.frames_received = 0
         self._buffer.clear()
+        self._pending.clear()
 
-        self._output_task = self.hass.async_create_background_task(
-            self._async_read_output(), name=f"eufy_max_bridge_{self.serial}"
-        )
-
-        # Ab jetzt kommen die Videodaten bei uns an.
         self.client.add_video_handler(self.serial, self._feed)
 
         try:
@@ -109,21 +89,7 @@ class P2PVideoBridge:
             await self.async_stop()
             return False
 
-        # Auf das erste Bild warten - der P2P-Aufbau dauert einige
-        # Sekunden. Kommt keins, laeuft die Bruecke trotzdem weiter und
-        # liefert nach, sobald ein Vollbild eintrifft.
-        try:
-            async with asyncio.timeout(FIRST_FRAME_TIMEOUT):
-                await self._first_frame.wait()
-        except TimeoutError:
-            _LOGGER.warning(
-                "Noch kein Bild von %s nach %s Sekunden - Bruecke laeuft weiter",
-                self.serial,
-                FIRST_FRAME_TIMEOUT,
-            )
-            return False
-
-        _LOGGER.info("P2P-Bruecke fuer %s liefert Bilder", self.serial)
+        _LOGGER.info("P2P-Bruecke fuer %s wartet auf Videodaten", self.serial)
         return True
 
     async def async_stop(self) -> None:
@@ -137,28 +103,47 @@ class P2PVideoBridge:
                 _LOGGER.debug("Livestream-Stopp fuer %s: %s", self.serial, err)
 
         self.running = False
+        self._starting = False
 
         if self._output_task:
             self._output_task.cancel()
             self._output_task = None
 
-        if self._process is not None:
-            try:
-                if self._process.stdin and not self._process.stdin.is_closing():
-                    self._process.stdin.close()
-                self._process.kill()
-                await self._process.wait()
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("ffmpeg-Ende fuer %s: %s", self.serial, err)
-            self._process = None
+        await self._async_kill_process()
 
         self._buffer.clear()
+        self._pending.clear()
+
+    async def _async_kill_process(self) -> None:
+        """ffmpeg beenden."""
+        if self._process is None:
+            return
+        try:
+            if self._process.stdin and not self._process.stdin.is_closing():
+                self._process.stdin.close()
+            self._process.kill()
+            await self._process.wait()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("ffmpeg-Ende fuer %s: %s", self.serial, err)
+        self._process = None
 
     # ------------------------------------------------------------------
 
-    def _feed(self, data: bytes) -> None:
-        """Ein Videopaket an ffmpeg weiterreichen."""
-        if not self.running or self._process is None:
+    def _feed(self, data: bytes, codec: str | None) -> None:
+        """Ein Videopaket verarbeiten."""
+        if not self.running:
+            return
+
+        # Noch kein ffmpeg: Paket zwischenspeichern und Start anstossen.
+        if self._process is None:
+            self._pending.extend(data)
+            if len(self._pending) > MAX_PENDING:
+                del self._pending[:-MAX_PENDING]
+
+            if not self._starting:
+                self._starting = True
+                self.codec = codec
+                self.hass.async_create_task(self._async_spawn(codec))
             return
 
         stdin = self._process.stdin
@@ -170,12 +155,75 @@ class P2PVideoBridge:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Schreiben nach ffmpeg fehlgeschlagen: %s", err)
 
+    async def _async_spawn(self, codec: str | None) -> None:
+        """ffmpeg passend zum gemeldeten Codec starten."""
+        key = (codec or "H264").upper()
+        input_format = CODEC_FORMATS.get(key, "h264")
+
+        _LOGGER.info(
+            "%s sendet %s - starte ffmpeg mit -f %s",
+            self.serial,
+            codec or "unbekannt",
+            input_format,
+        )
+
+        binary = get_ffmpeg_manager(self.hass).binary
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                binary,
+                "-hide_banner",
+                "-loglevel", "error",
+                # Der Strom beginnt mitten drin: Fehler am Anfang
+                # ignorieren und auf das naechste Vollbild warten.
+                "-err_detect", "ignore_err",
+                "-fflags", "nobuffer+discardcorrupt+genpts",
+                "-flags", "low_delay",
+                "-analyzeduration", "10000000",
+                "-probesize", "5000000",
+                "-f", input_format,
+                "-i", "pipe:0",
+                "-an",
+                "-vf", f"fps={OUTPUT_FPS}",
+                "-q:v", str(JPEG_QUALITY),
+                "-f", "image2pipe",
+                "-vcodec", "mjpeg",
+                "pipe:1",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("ffmpeg konnte nicht gestartet werden: %s", err)
+            self._starting = False
+            return
+
+        if not self.running:
+            # Zwischenzeitlich gestoppt.
+            self._process = process
+            await self._async_kill_process()
+            return
+
+        self._process = process
+        self._output_task = self.hass.async_create_background_task(
+            self._async_read_output(), name=f"eufy_max_bridge_{self.serial}"
+        )
+
+        # Die zwischengespeicherten Pakete nachreichen.
+        if self._pending and process.stdin is not None:
+            try:
+                process.stdin.write(bytes(self._pending))
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Zwischenspeicher nicht schreibbar: %s", err)
+            self._pending.clear()
+
     async def _async_read_output(self) -> None:
         """JPEG-Bilder aus der ffmpeg-Ausgabe herausschneiden."""
-        assert self._process is not None
-        stdout = self._process.stdout
-        if stdout is None:
+        process = self._process
+        if process is None or process.stdout is None:
             return
+
+        stdout = process.stdout
 
         try:
             while self.running:
@@ -193,7 +241,6 @@ class P2PVideoBridge:
 
                     end = self._buffer.find(JPEG_END, start + 2)
                     if end == -1:
-                        # Bild noch unvollstaendig - Anfang behalten.
                         if start > 0:
                             del self._buffer[:start]
                         break
@@ -204,6 +251,7 @@ class P2PVideoBridge:
 
                     if not self._first_frame.is_set():
                         self._first_frame.set()
+                        _LOGGER.info("%s liefert jetzt Bilder", self.serial)
 
                 if len(self._buffer) > MAX_BUFFER:
                     _LOGGER.debug("Bildpuffer fuer %s verworfen", self.serial)
@@ -213,15 +261,15 @@ class P2PVideoBridge:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Ausgabe von ffmpeg beendet: %s", err)
         finally:
-            await self._async_log_ffmpeg_errors()
+            await self._async_log_ffmpeg_errors(process)
 
-    async def _async_log_ffmpeg_errors(self) -> None:
+    async def _async_log_ffmpeg_errors(self, process) -> None:
         """Fehlermeldungen von ffmpeg sichtbar machen."""
-        if self._process is None or self._process.stderr is None:
+        if process is None or process.stderr is None:
             return
         try:
             async with asyncio.timeout(2):
-                data = await self._process.stderr.read(4000)
+                data = await process.stderr.read(4000)
         except Exception:  # noqa: BLE001
             return
 
