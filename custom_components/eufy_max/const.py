@@ -4,7 +4,7 @@ from __future__ import annotations
 
 DOMAIN = "eufy_max"
 
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = ""
 DEFAULT_PORT = 3000
 
 # Hoechste Schema-Version, die dieser Client versteht. Beim Verbinden wird
