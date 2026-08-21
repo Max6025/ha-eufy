@@ -4,9 +4,12 @@ Ohne HomeBase ist jede Kamera ihre eigene Station und hat einen eigenen
 Guard Mode. Deshalb bekommt jede Kamera ein eigenes Panel, zusaetzlich
 gibt es ein Sammelpanel fuer alle Kameras gleichzeitig.
 
-Wichtig: Es wird nur alarm_state ueberschrieben, nicht state. Home
-Assistant lehnt sonst die Dienste ab - genau das war die Ursache dafuer,
-dass jeder Klick auf ein Panel mit einer Fehlermeldung endete.
+Ueber translation_key tragen die Panels die Modusnamen aus der Eufy-App
+statt der Standardtexte von Home Assistant.
+
+Modelle, die die Eufy-Bibliothek noch nicht kennt (z.B. eufyCam C37),
+lehnen sowohl guardMode als auch motionDetection ab. Fuer die gibt es
+eine verstaendliche Fehlermeldung statt eines Rohfehlers.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from homeassistant.components.alarm_control_panel import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -68,6 +72,10 @@ SUPPORTED = (
     | AlarmControlPanelEntityFeature.TRIGGER
 )
 
+# Eigenschaften, ueber die sich eine Kamera ersatzweise scharf schalten
+# laesst, wenn es keinen Guard Mode gibt.
+FALLBACK_PROPERTIES = (MOTION_DETECTION_PROPERTY, "enabled")
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -85,13 +93,9 @@ async def async_setup_entry(
 
 
 class EufyMaxCameraAlarmPanel(EufyMaxEntity, AlarmControlPanelEntity):
-    """Panel fuer eine einzelne Kamera.
+    """Panel fuer eine einzelne Kamera."""
 
-    Hat die Kamera eine eigene Station, wird der echte Guard Mode
-    geschaltet. Sonst wird als Ersatz die Bewegungserkennung geschaltet.
-    """
-
-    _attr_name = "Alarm"
+    _attr_translation_key = "eufy_alarm"
     _attr_code_arm_required = False
     _attr_supported_features = SUPPORTED
 
@@ -107,6 +111,15 @@ class EufyMaxCameraAlarmPanel(EufyMaxEntity, AlarmControlPanelEntity):
         if self._own_station:
             return self.serial
         return self.device.get("stationSerialNumber")
+
+    def _fallback_property(self) -> str | None:
+        """Erste beschreibbare Ersatzeigenschaft dieser Kamera."""
+        metadata = self.client.get_metadata(self.serial)
+        for prop in FALLBACK_PROPERTIES:
+            meta = metadata.get(prop)
+            if meta and meta.get("writeable"):
+                return prop
+        return None
 
     async def async_added_to_hass(self) -> None:
         """Zusaetzlich auf Updates der Station hoeren."""
@@ -139,8 +152,14 @@ class EufyMaxCameraAlarmPanel(EufyMaxEntity, AlarmControlPanelEntity):
                     int(mode), AlarmControlPanelState.DISARMED
                 )
 
-        # Ersatzlogik ohne eigene Station
-        if self.get_property(MOTION_DETECTION_PROPERTY):
+        # Ersatzlogik: Bewegungserkennung als Scharfschaltung
+        prop = self._fallback_property()
+        if prop is None:
+            # Weder Guard Mode noch schaltbare Eigenschaft. Unbekannt ist
+            # ehrlicher als ein falsches "unscharf".
+            return None
+
+        if self.get_property(prop):
             return AlarmControlPanelState.ARMED_AWAY
         return AlarmControlPanelState.DISARMED
 
@@ -161,28 +180,44 @@ class EufyMaxCameraAlarmPanel(EufyMaxEntity, AlarmControlPanelEntity):
             "guard_mode_name": (
                 GUARD_MODE_NAMES.get(int(mode)) if mode is not None else None
             ),
+            "schaltbar_ueber": (
+                "guard_mode" if mode is not None else self._fallback_property()
+            ),
         }
 
     async def _async_set_mode(self, mode: int) -> None:
         """Modus setzen - echter Guard Mode oder Ersatzlogik."""
         station = self._station_serial
+        letzter_fehler: Exception | None = None
+
         if station:
             try:
                 await self.client.async_set_guard_mode(station, mode)
                 self.async_write_ha_state()
                 return
             except Exception as err:  # noqa: BLE001
-                _LOGGER.warning(
-                    "Guard Mode fuer %s nicht setzbar (%s), nutze Bewegungserkennung",
-                    self.serial,
-                    err,
+                letzter_fehler = err
+                _LOGGER.debug(
+                    "Guard Mode fuer %s nicht setzbar: %s", self.serial, err
                 )
 
-        scharf = mode not in (GUARD_DISARMED, GUARD_OFF)
-        await self.client.async_set_property(
-            self.serial, MOTION_DETECTION_PROPERTY, scharf
+        prop = self._fallback_property()
+        if prop is not None:
+            scharf = mode not in (GUARD_DISARMED, GUARD_OFF)
+            try:
+                await self.client.async_set_property(self.serial, prop, scharf)
+                self.async_write_ha_state()
+                return
+            except Exception as err:  # noqa: BLE001
+                letzter_fehler = err
+
+        name = self.device.get("name", self.serial)
+        modell = self.device.get("model", "unbekannt")
+        raise HomeAssistantError(
+            f"{name} ({modell}) laesst sich nicht schalten. Eufy lehnt den "
+            f"Befehl ab ({letzter_fehler}). Dieses Modell wird von "
+            "eufy-security-client noch nicht unterstuetzt."
         )
-        self.async_write_ha_state()
 
     async def async_alarm_disarm(self, code: str | None = None) -> None:
         """Unscharf schalten."""
@@ -220,7 +255,7 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
 
     _attr_has_entity_name = True
     _attr_should_poll = False
-    _attr_name = "Alarm alle Kameras"
+    _attr_translation_key = "eufy_alarm_alle"
     _attr_unique_id = "eufy_max_master_alarm"
     _attr_icon = "mdi:shield-home"
     _attr_code_arm_required = False
@@ -272,12 +307,11 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
         modes.discard(None)
 
         if not modes:
-            return AlarmControlPanelState.DISARMED
+            return None
         if len(modes) == 1:
             return MODE_TO_STATE.get(
                 int(next(iter(modes))), AlarmControlPanelState.DISARMED
             )
-        # Uneinheitlich: sobald irgendwas scharf ist, gilt scharf.
         if any(int(m) not in (GUARD_DISARMED, GUARD_OFF) for m in modes):
             return AlarmControlPanelState.ARMED_CUSTOM_BYPASS
         return AlarmControlPanelState.DISARMED
@@ -295,13 +329,25 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
         }
 
     async def _async_set_all(self, mode: int) -> None:
-        """Modus auf allen Stationen setzen."""
+        """Modus auf allen Stationen setzen, die ihn annehmen."""
+        fehler: list[str] = []
         for serial in self.client.stations:
             try:
                 await self.client.async_set_guard_mode(serial, mode)
             except Exception as err:  # noqa: BLE001
-                _LOGGER.error("Guard Mode fuer Station %s: %s", serial, err)
+                fehler.append(f"{serial}: {err}")
+
         self.async_write_ha_state()
+
+        if fehler and len(fehler) == len(self.client.stations):
+            raise HomeAssistantError(
+                "Keine Station hat den Moduswechsel angenommen: "
+                + "; ".join(fehler)
+            )
+        if fehler:
+            _LOGGER.warning(
+                "Moduswechsel teilweise fehlgeschlagen: %s", "; ".join(fehler)
+            )
 
     async def async_alarm_disarm(self, code: str | None = None) -> None:
         """Alles unscharf."""
