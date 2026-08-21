@@ -5,15 +5,22 @@ ueber die WebSocket-Verbindung - rohes H.264 oder H.265, keine URL.
 Diese Bruecke schiebt den Datenstrom in ein ffmpeg und holt am anderen
 Ende Einzelbilder heraus.
 
-Wichtig: ffmpeg wird erst gestartet, wenn das erste Videopaket da ist.
-Erst dann ist bekannt, welchen Codec die Kamera benutzt - und ein
-H.265-Strom durch einen H.264-Decoder ergibt schlicht nichts.
+ffmpeg wird erst gestartet, wenn das erste Videopaket da ist - erst dann
+ist bekannt, welchen Codec die Kamera benutzt.
+
+Liefert eine Kamera ueberhaupt kein Video (etwa die eufyCam C37, deren
+Videokanal eufy-security-client noch nicht bedienen kann), wird das nach
+wenigen Versuchen EINMAL vermerkt und danach nicht mehr versucht. Sonst
+laeuft das Protokoll mit immer denselben Zeitueberschreitungen voll.
+Ereignisse, Erkennung und Ereignisbilder laufen davon unbeeindruckt
+weiter - die kommen ueber einen anderen Kanal.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.core import HomeAssistant
@@ -33,10 +40,10 @@ MAX_BUFFER = 4_000_000
 MAX_PENDING = 2_000_000
 
 # Manche Kameras schliessen ihre P2P-Verbindung zum Stromsparen. Der
-# erste Startbefehl weckt sie nur, geliefert wird erst nach einem
-# zweiten. Deshalb wird der Befehl wiederholt, solange nichts ankommt.
+# erste Startbefehl weckt sie nur. Zwei Versuche reichen - danach liefert
+# die Kamera erfahrungsgemaess gar nicht.
 RETRY_AFTER = 12
-MAX_RETRIES = 4
+MAX_RETRIES = 2
 
 # Codecnamen aus den Paketen -> Eingabeformat fuer ffmpeg
 CODEC_FORMATS = {
@@ -52,19 +59,23 @@ class P2PVideoBridge:
     """Wandelt den P2P-Datenstrom einer Kamera in Einzelbilder."""
 
     def __init__(
-        self, hass: HomeAssistant, client: EufyMaxClient, serial: str
+        self,
+        hass: HomeAssistant,
+        client: EufyMaxClient,
+        serial: str,
+        on_no_video: Callable[[str], None] | None = None,
     ) -> None:
         """Bruecke fuer eine Kamera anlegen."""
         self.hass = hass
         self.client = client
         self.serial = serial
+        self._on_no_video = on_no_video
 
         self.running: bool = False
         self.latest_image: bytes | None = None
         self.frames_received: int = 0
         self.codec: str | None = None
-        # Wird False, wenn die Kamera den Livestream-Befehl ablehnt -
-        # bei Modellen, die eufy-security-client noch nicht kennt.
+        # Wird False, wenn die Kamera keinen Livestream liefern kann.
         self.supported: bool = True
 
         self._process: asyncio.subprocess.Process | None = None
@@ -98,22 +109,20 @@ class P2PVideoBridge:
             text = str(err)
             if "ot_supported" in text or "NotSupported" in text:
                 self.supported = False
-                _LOGGER.warning(
-                    "%s unterstuetzt keinen Livestream ueber eufy-security-client. "
-                    "Es wird nur das letzte Ereignisbild angezeigt",
+                _LOGGER.info(
+                    "%s unterstuetzt keinen Livestream - es bleibt beim "
+                    "Ereignisbild",
                     self.serial,
                 )
             else:
-                _LOGGER.error(
+                _LOGGER.warning(
                     "Livestream fuer %s nicht startbar: %s", self.serial, err
                 )
-            # Keinen Stopp-Befehl senden - es laeuft ja nichts.
             await self.async_stop(request_stop=False)
             return False
 
-        _LOGGER.info("P2P-Bruecke fuer %s wartet auf Videodaten", self.serial)
+        _LOGGER.debug("P2P-Bruecke fuer %s wartet auf Videodaten", self.serial)
 
-        # Wiederholung anstossen, falls keine Daten kommen.
         self._retry_task = self.hass.async_create_background_task(
             self._async_retry_loop(), name=f"eufy_max_retry_{self.serial}"
         )
@@ -121,36 +130,48 @@ class P2PVideoBridge:
 
     async def _async_retry_loop(self) -> None:
         """Startbefehl wiederholen, solange keine Videodaten ankommen."""
-        for versuch in range(1, MAX_RETRIES + 1):
+        for _ in range(MAX_RETRIES):
             await asyncio.sleep(RETRY_AFTER)
 
             if not self.running or self._packets > 0:
                 return
 
-            _LOGGER.warning(
-                "Keine Videodaten von %s - Startbefehl wird wiederholt (%s/%s)",
-                self.serial,
-                versuch,
-                MAX_RETRIES,
-            )
             try:
                 await self.client.async_start_livestream(self.serial)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Wiederholung fuer %s: %s", self.serial, err)
 
-        if self._packets == 0:
-            _LOGGER.error(
-                "%s liefert auch nach %s Versuchen keine Videodaten. "
-                "Die Kamera nimmt den Livestream-Befehl nicht an",
-                self.serial,
-                MAX_RETRIES,
-            )
+        await asyncio.sleep(RETRY_AFTER)
+
+        if not self.running or self._packets > 0:
+            return
+
+        # Aufgeben - aber nur einmal, und ohne Fehlerstufe. Die Kamera
+        # bleibt nutzbar, sie zeigt eben nur Ereignisbilder.
+        self.supported = False
+        _LOGGER.info(
+            "%s sendet kein Video (Kanal wird von eufy-security-client noch "
+            "nicht unterstuetzt). Livestream wird fuer diese Kamera nicht "
+            "mehr versucht - Ereignisse und Erkennung laufen weiter",
+            self.serial,
+        )
+
+        if self._on_no_video is not None:
+            try:
+                self._on_no_video(self.serial)
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("Rueckmeldung fuer %s fehlgeschlagen", self.serial)
+
+        await self.async_stop(request_stop=False)
 
     async def async_stop(self, request_stop: bool = True) -> None:
         """Alles wieder abbauen."""
         self.client.remove_video_handler(self.serial)
 
-        if self.running and request_stop:
+        # Der Stopp-Befehl wird nur geschickt, wenn wirklich etwas lief.
+        # Sonst antwortet Eufy mit LivestreamNotRunningError, und das
+        # Protokoll fuellt sich mit Folgefehlern.
+        if self.running and request_stop and self._packets > 0:
             try:
                 await self.client.async_stop_livestream(self.serial)
             except Exception as err:  # noqa: BLE001
@@ -200,7 +221,6 @@ class P2PVideoBridge:
                 codec or "unbekannt",
             )
 
-        # Noch kein ffmpeg: Paket zwischenspeichern und Start anstossen.
         if self._process is None:
             self._pending.extend(data)
             if len(self._pending) > MAX_PENDING:
@@ -240,8 +260,6 @@ class P2PVideoBridge:
                 binary,
                 "-hide_banner",
                 "-loglevel", "error",
-                # Der Strom beginnt mitten drin: Fehler am Anfang
-                # ignorieren und auf das naechste Vollbild warten.
                 "-err_detect", "ignore_err",
                 "-fflags", "nobuffer+discardcorrupt+genpts",
                 "-flags", "low_delay",
@@ -265,7 +283,6 @@ class P2PVideoBridge:
             return
 
         if not self.running:
-            # Zwischenzeitlich gestoppt.
             self._process = process
             await self._async_kill_process()
             return
@@ -275,7 +292,6 @@ class P2PVideoBridge:
             self._async_read_output(), name=f"eufy_max_bridge_{self.serial}"
         )
 
-        # Die zwischengespeicherten Pakete nachreichen.
         if self._pending and process.stdin is not None:
             try:
                 process.stdin.write(bytes(self._pending))
@@ -330,7 +346,7 @@ class P2PVideoBridge:
             await self._async_log_ffmpeg_errors(process)
 
     async def _async_log_ffmpeg_errors(self, process) -> None:
-        """Fehlermeldungen von ffmpeg sichtbar machen."""
+        """Fehlermeldungen von ffmpeg nur zur Fehlersuche protokollieren."""
         if process is None or process.stderr is None:
             return
         try:
@@ -340,7 +356,7 @@ class P2PVideoBridge:
             return
 
         if data:
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "ffmpeg meldet fuer %s: %s",
                 self.serial,
                 data.decode(errors="replace").strip(),
