@@ -3,6 +3,10 @@
 Die Modi sind dieselben wie in der Eufy-App. Sie haengen an derselben
 Stationseigenschaft wie das Alarmpanel - dadurch sind App, Panel und
 Auswahlliste automatisch synchron.
+
+Modelle, die die Eufy-Bibliothek noch nicht kennt (z.B. eufyCam C37),
+melden keinen Guard Mode. Fuer die wird gar keine Auswahlliste angelegt,
+statt eine anzubieten, die beim Anklicken nur Fehler wirft.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import logging
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -55,8 +60,14 @@ async def async_setup_entry(
     client: EufyMaxClient = hass.data[DOMAIN][entry.entry_id]
     entities: list[SelectEntity] = []
 
-    # Eufy-Modus je Station
+    # Eufy-Modus je Station - nur wo die Station den Modus auch meldet
     for serial in client.stations:
+        if client.get_station_property(serial, GUARD_MODE_PROPERTY) is None:
+            _LOGGER.info(
+                "%s meldet keinen Guard Mode - keine Modus-Auswahl angelegt",
+                serial,
+            )
+            continue
         entities.append(EufyMaxGuardModeSelect(client, serial))
 
     # Alles, was das Geraet selbst an Auswahlmoeglichkeiten meldet
@@ -74,11 +85,7 @@ async def async_setup_entry(
 
 
 class EufyMaxGuardModeSelect(SelectEntity):
-    """Der Eufy-Modus einer Station - dieselben Modi wie in der App.
-
-    Erbt nur von SelectEntity: SelectEntity bringt Entity bereits mit,
-    beide zusammen als Basisklassen anzugeben ist unzulaessig.
-    """
+    """Der Eufy-Modus einer Station - dieselben Modi wie in der App."""
 
     _attr_has_entity_name = True
     _attr_should_poll = False
@@ -140,7 +147,14 @@ class EufyMaxGuardModeSelect(SelectEntity):
         mode = GUARD_OPTIONS.get(option)
         if mode is None:
             return
-        await self.client.async_set_guard_mode(self.serial, mode)
+        try:
+            await self.client.async_set_guard_mode(self.serial, mode)
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError(
+                f"Eufy hat den Moduswechsel abgelehnt ({err}). Dieses "
+                "Kameramodell wird von eufy-security-client noch nicht "
+                "unterstuetzt."
+            ) from err
         self.async_write_ha_state()
 
 
