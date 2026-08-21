@@ -3,6 +3,10 @@
 Kameras streamen nicht dauerhaft, sondern werden gezielt aufgeschaltet
 und nach einer einstellbaren Zeit automatisch wieder abgeschaltet - je
 Kamera einzeln oder alle zusammen.
+
+Kameras, die kein Video liefern, werden einmal vermerkt und danach beim
+Aufschalten uebersprungen. Ereignisse und Erkennung laufen bei ihnen
+unveraendert weiter.
 """
 
 from __future__ import annotations
@@ -65,12 +69,7 @@ def camera_serials(client: EufyMaxClient) -> list[str]:
 
 
 class StreamController:
-    """Schaltet Kameras einzeln oder gemeinsam auf.
-
-    Jede Kamera hat ihre eigene Abschaltzeit. Das ist wichtig, weil Eufy
-    nicht beliebig viele Livestreams gleichzeitig zulaesst - wer nur eine
-    Kamera ansehen will, soll nicht alle belegen.
-    """
+    """Schaltet Kameras einzeln oder gemeinsam auf."""
 
     def __init__(self, hass: HomeAssistant, client: EufyMaxClient) -> None:
         """Controller initialisieren."""
@@ -82,9 +81,7 @@ class StreamController:
         self.ends_at_map: dict[str, datetime] = {}
         # serialNumber -> laufende P2P-Bruecke
         self.bridges: dict[str, P2PVideoBridge] = {}
-        # Kameras, deren Livestream die Bibliothek ablehnt. Fuer die gibt
-        # es nur das letzte Ereignisbild - erneute Versuche erzeugen nur
-        # Fehler im Protokoll.
+        # Kameras ohne nutzbaren Videokanal
         self.unsupported: set[str] = set()
         self._timers: dict[str, object] = {}
 
@@ -151,6 +148,12 @@ class StreamController:
             _LOGGER.warning("Unbekannte Kamera: %s", serial)
             return
 
+        if serial in self.unsupported:
+            _LOGGER.debug(
+                "%s liefert kein Video - Aufschalten uebersprungen", serial
+            )
+            return
+
         already = serial in self.ends_at_map
 
         self.ends_at_map[serial] = dt_util.utcnow() + timedelta(seconds=seconds)
@@ -159,7 +162,7 @@ class StreamController:
 
         if not already:
             await self._async_start_camera(serial)
-            _LOGGER.info(
+            _LOGGER.debug(
                 "Livestream fuer %s gestartet, Abschaltung in %s Sekunden",
                 self.client.get_property(serial, "name", serial),
                 seconds,
@@ -178,20 +181,15 @@ class StreamController:
     # ------------------------------------------------------------------
 
     async def async_start(self, duration: int | None = None) -> None:
-        """Alle Kameras aufschalten."""
+        """Alle Kameras aufschalten, die Video liefern koennen."""
         seconds = int(duration or self.duration)
-        serials = camera_serials(self.client)
+        serials = [
+            s for s in camera_serials(self.client) if s not in self.unsupported
+        ]
 
         if not serials:
             _LOGGER.warning("Keine streamfaehige Kamera gefunden")
             return
-
-        _LOGGER.info(
-            "Starte Livestream fuer %s Kameras. Hinweis: Eufy laesst nicht "
-            "beliebig viele Streams gleichzeitig zu - fuer eine einzelne "
-            "Kamera besser eufy_max.start_camera_stream nutzen",
-            len(serials),
-        )
 
         await asyncio.gather(
             *(self.async_start_one(serial, seconds) for serial in serials),
@@ -204,11 +202,9 @@ class StreamController:
             *(self.async_stop_one(serial) for serial in list(self.ends_at_map)),
             return_exceptions=True,
         )
-        # Sicherheitshalber auch verwaiste Bruecken einsammeln.
         for serial in list(self.bridges):
             await self._async_stop_camera(serial)
 
-        _LOGGER.info("Livestream aller Kameras gestoppt")
         self._notify()
 
     async def async_extend(self, seconds: int) -> None:
@@ -235,32 +231,43 @@ class StreamController:
             try:
                 await self.client.async_set_property(serial, RTSP_PROPERTY, True)
             except Exception as err:  # noqa: BLE001
-                _LOGGER.error("RTSP fuer %s nicht aktivierbar: %s", serial, err)
+                _LOGGER.warning("RTSP fuer %s nicht aktivierbar: %s", serial, err)
             return
 
-        if serial in self.bridges:
+        if serial in self.bridges or serial in self.unsupported:
             return
 
-        if serial in self.unsupported:
-            _LOGGER.debug(
-                "%s kann keinen Livestream - es bleibt beim Ereignisbild",
-                serial,
-            )
-            return
-
-        bridge = P2PVideoBridge(self.hass, self.client, serial)
+        bridge = P2PVideoBridge(
+            self.hass, self.client, serial, on_no_video=self._kein_video
+        )
         self.bridges[serial] = bridge
         await bridge.async_start()
 
         if not bridge.supported:
-            self.unsupported.add(serial)
-            self.bridges.pop(serial, None)
+            self._kein_video(serial)
+
+    @callback
+    def _kein_video(self, serial: str) -> None:
+        """Kamera als nicht streamfaehig vermerken.
+
+        Ab jetzt wird fuer sie kein Livestream mehr angefordert. Sie
+        bleibt voll nutzbar - Ereignisse, Erkennung und Ereignisbilder
+        kommen ueber einen anderen Kanal und laufen weiter.
+        """
+        self.unsupported.add(serial)
+        self.bridges.pop(serial, None)
+        self.ends_at_map.pop(serial, None)
+        self._cancel_timer(serial)
+        self._notify()
 
     async def _async_stop_camera(self, serial: str) -> None:
         """Kamera wieder abschalten."""
         bridge = self.bridges.pop(serial, None)
         if bridge is not None:
             await bridge.async_stop()
+            return
+
+        if serial in self.unsupported:
             return
 
         metadata = self.client.get_metadata(serial)
