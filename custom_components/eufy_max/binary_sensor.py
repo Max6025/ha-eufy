@@ -1,4 +1,10 @@
-"""Ereignis-Sensoren: Bewegung, Person, Tier, Klingeln."""
+"""Ereignis-Sensoren: Bewegung, Person, Tier, Klingeln.
+
+Der Server liefert dasselbe Ereignis auf zwei Wegen: als benanntes
+Ereignis ("person detected") und als Eigenschaftsaenderung
+("personDetected"). Welcher Weg genutzt wird, haengt vom Modell und der
+Firmware ab - deshalb werden hier immer beide Schluessel geprueft.
+"""
 
 from __future__ import annotations
 
@@ -14,15 +20,36 @@ from .const import DOMAIN
 from .entity import EufyMaxEntity
 from .websocket import EufyMaxClient
 
+# Ereignisschluessel -> (Anzeigename, Geraeteklasse, Eigenschaftsname)
 EVENTS = {
-    "motion_detected": ("Bewegung", BinarySensorDeviceClass.MOTION),
-    "person_detected": ("Person", BinarySensorDeviceClass.MOTION),
-    "pet_detected": ("Tier", BinarySensorDeviceClass.MOTION),
-    "vehicle_detected": ("Fahrzeug", BinarySensorDeviceClass.MOTION),
-    "sound_detected": ("Gerausch", BinarySensorDeviceClass.SOUND),
-    "crying_detected": ("Weinen", BinarySensorDeviceClass.SOUND),
-    "package_delivered": ("Paket", None),
-    "rings": ("Klingel", None),
+    "motion_detected": (
+        "Bewegung",
+        BinarySensorDeviceClass.MOTION,
+        "motionDetected",
+    ),
+    "person_detected": (
+        "Person",
+        BinarySensorDeviceClass.MOTION,
+        "personDetected",
+    ),
+    "pet_detected": ("Tier", BinarySensorDeviceClass.MOTION, "petDetected"),
+    "vehicle_detected": (
+        "Fahrzeug",
+        BinarySensorDeviceClass.MOTION,
+        "vehicleDetected",
+    ),
+    "sound_detected": (
+        "Geraeusch",
+        BinarySensorDeviceClass.SOUND,
+        "soundDetected",
+    ),
+    "crying_detected": (
+        "Weinen",
+        BinarySensorDeviceClass.SOUND,
+        "cryingDetected",
+    ),
+    "package_delivered": ("Paket", None, "packageDelivered"),
+    "rings": ("Klingel", None, "ringing"),
 }
 
 
@@ -35,13 +62,14 @@ async def async_setup_entry(
 
     for serial in client.devices:
         metadata = client.get_metadata(serial)
-        for key, (label, device_class) in EVENTS.items():
-            prop = key.replace("_detected", "Detected").replace("_", "")
-            # Sensor anlegen, wenn das Geraet die Faehigkeit meldet oder
-            # der Ereignistyp generell zu Kameras gehoert.
+        for key, (label, device_class, prop) in EVENTS.items():
+            # Bewegung und Person gibt es bei jeder Kamera, der Rest nur,
+            # wenn das Geraet die Eigenschaft meldet.
             if prop in metadata or key in ("motion_detected", "person_detected"):
                 entities.append(
-                    EufyMaxBinarySensor(client, serial, key, label, device_class)
+                    EufyMaxBinarySensor(
+                        client, serial, key, prop, label, device_class
+                    )
                 )
 
     async_add_entities(entities)
@@ -50,15 +78,18 @@ async def async_setup_entry(
 class EufyMaxBinarySensor(EufyMaxEntity, BinarySensorEntity):
     """Ein Erkennungsereignis der Kamera."""
 
-    def __init__(self, client, serial, key, label, device_class) -> None:
+    def __init__(self, client, serial, key, prop, label, device_class) -> None:
         """Sensor initialisieren."""
         super().__init__(client, serial)
         self.key = key
+        self.prop = prop
         self._attr_unique_id = f"{serial}_{key}"
         self._attr_name = label
         self._attr_device_class = device_class
 
     @property
     def is_on(self) -> bool:
-        """Ereignis aktiv?"""
+        """Ereignis aktiv? Beide Schreibweisen pruefen."""
+        if self.get_property(self.prop):
+            return True
         return bool(self.get_property(self.key, False))
