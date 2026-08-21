@@ -23,8 +23,42 @@
       "init": {
         "title": "Eufy Max Optionen",
         "data": {
-          "rtsp_first": "RTSP bevorzugen (empfohlen)",
+          "rtsp_first": "RTSP bevorzugen (nur wenn die Kamera eine gueltige RTSP-Adresse meldet)",
           "snapshot_from_stream": "Standbilder aus dem Livestream erzeugen"
+        }
+      }
+    }
+  },
+  "entity": {
+    "alarm_control_panel": {
+      "eufy_alarm": {
+        "name": "Alarm",
+        "state": {
+          "disarmed": "Unscharf",
+          "armed_away": "Abwesend",
+          "armed_home": "Zuhause",
+          "armed_night": "Eigener Modus 1",
+          "armed_vacation": "Eigener Modus 2",
+          "armed_custom_bypass": "Zeitplan",
+          "arming": "Wird scharf geschaltet",
+          "disarming": "Wird entschaerft",
+          "pending": "Ausloesung steht bevor",
+          "triggered": "Alarm ausgeloest"
+        }
+      },
+      "eufy_alarm_alle": {
+        "name": "Alarm alle Kameras",
+        "state": {
+          "disarmed": "Unscharf",
+          "armed_away": "Abwesend",
+          "armed_home": "Zuhause",
+          "armed_night": "Eigener Modus 1",
+          "armed_vacation": "Eigener Modus 2",
+          "armed_custom_bypass": "Gemischt oder Zeitplan",
+          "arming": "Wird scharf geschaltet",
+          "disarming": "Wird entschaerft",
+          "pending": "Ausloesung steht bevor",
+          "triggered": "Alarm ausgeloest"
         }
       }
     }

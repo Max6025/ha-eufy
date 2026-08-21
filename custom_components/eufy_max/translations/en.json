@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "Eufy Max einrichten",
-        "description": "Adresse des eufy-security-ws Servers. Bei einem Add-on auf dem gleichen System ist das 127.0.0.1:3000.",
+        "title": "Set up Eufy Max",
+        "description": "Address of the Eufy Max WS server. The hostname is shown in the add-on log, e.g. 8fcbb48c-eufy-max-ws, port 3000.",
         "data": {
           "host": "Host",
           "port": "Port"
@@ -11,20 +11,54 @@
       }
     },
     "error": {
-      "cannot_connect": "Verbindung fehlgeschlagen. Laeuft das Add-on und ist der Port richtig?"
+      "cannot_connect": "Connection failed. Is the add-on running and the port correct?"
     },
     "abort": {
-      "already_configured": "Dieser Server ist bereits eingerichtet.",
-      "cannot_connect": "Das Add-on wurde gefunden, antwortet aber nicht. Laeuft es?"
+      "already_configured": "This server is already configured.",
+      "cannot_connect": "The add-on was found but does not respond. Is it running?"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Eufy Max Optionen",
+        "title": "Eufy Max options",
         "data": {
-          "rtsp_first": "RTSP bevorzugen (empfohlen)",
-          "snapshot_from_stream": "Standbilder aus dem Livestream erzeugen"
+          "rtsp_first": "Prefer RTSP (only if the camera reports a valid RTSP address)",
+          "snapshot_from_stream": "Create still images from the live stream"
+        }
+      }
+    }
+  },
+  "entity": {
+    "alarm_control_panel": {
+      "eufy_alarm": {
+        "name": "Alarm",
+        "state": {
+          "disarmed": "Disarmed",
+          "armed_away": "Away",
+          "armed_home": "Home",
+          "armed_night": "Custom mode 1",
+          "armed_vacation": "Custom mode 2",
+          "armed_custom_bypass": "Schedule",
+          "arming": "Arming",
+          "disarming": "Disarming",
+          "pending": "Pending",
+          "triggered": "Triggered"
+        }
+      },
+      "eufy_alarm_alle": {
+        "name": "Alarm all cameras",
+        "state": {
+          "disarmed": "Disarmed",
+          "armed_away": "Away",
+          "armed_home": "Home",
+          "armed_night": "Custom mode 1",
+          "armed_vacation": "Custom mode 2",
+          "armed_custom_bypass": "Mixed or schedule",
+          "arming": "Arming",
+          "disarming": "Disarming",
+          "pending": "Pending",
+          "triggered": "Triggered"
         }
       }
     }
