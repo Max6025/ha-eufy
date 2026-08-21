@@ -14,7 +14,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -74,8 +73,12 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class EufyMaxGuardModeSelect(Entity, SelectEntity):
-    """Der Eufy-Modus einer Station - dieselben Modi wie in der App."""
+class EufyMaxGuardModeSelect(SelectEntity):
+    """Der Eufy-Modus einer Station - dieselben Modi wie in der App.
+
+    Erbt nur von SelectEntity: SelectEntity bringt Entity bereits mit,
+    beide zusammen als Basisklassen anzugeben ist unzulaessig.
+    """
 
     _attr_has_entity_name = True
     _attr_should_poll = False
