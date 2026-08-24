@@ -26,6 +26,12 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Akkukameras schlafen zwischen zwei Ereignissen. Ein Befehl an eine
+# schlafende Kamera wird vom Server angenommen, kommt aber nie an.
+# Deshalb wird vorher die P2P-Sitzung aufgebaut.
+WAKE_TIMEOUT = 12
+WAKE_POLL = 0.5
+
 
 class EufyMaxError(Exception):
     """Allgemeiner Fehler der Integration."""
@@ -63,6 +69,8 @@ class EufyMaxClient:
         self._auth_listeners: list[Callable[[str, dict[str, Any]], None]] = []
         # serialNumber -> Empfaenger fuer rohe P2P-Videodaten
         self._video_handlers: dict[str, Callable[[bytes, str | None], None]] = {}
+        # Damit nicht mehrere Befehle gleichzeitig dieselbe Kamera wecken
+        self._wake_locks: dict[str, asyncio.Lock] = {}
         # Wird von __init__.py gesetzt: zentraler Livestream-Controller
         self.stream: Any = None
 
@@ -304,6 +312,81 @@ class EufyMaxClient:
             )
 
     # ------------------------------------------------------------------
+    # Akkukameras aufwecken
+    # ------------------------------------------------------------------
+
+    def station_for(self, serial: str) -> str:
+        """Zur Kamera die zustaendige Station finden.
+
+        Ohne HomeBase ist jede Kamera ihre eigene Station - dann ist die
+        Seriennummer identisch.
+        """
+        station = self.get_device(serial).get("stationSerialNumber")
+        if station and station in self.stations:
+            return station
+        if serial in self.stations:
+            return serial
+        return station or serial
+
+    async def async_station_connected(self, station: str) -> bool:
+        """Pruefen, ob die P2P-Sitzung zur Station steht."""
+        try:
+            result = await self.async_send_command(
+                {"command": "station.is_connected", "serialNumber": station}
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("is_connected fuer %s: %s", station, err)
+            return False
+
+        # Je nach Schema heisst das Feld anders.
+        for key in ("connected", "serialNumber", "result"):
+            value = result.get(key)
+            if isinstance(value, bool):
+                return value
+        return bool(result.get("connected", False))
+
+    async def async_wake(self, serial: str) -> bool:
+        """Kamera aufwecken, bevor ein Befehl geschickt wird.
+
+        Akkukameras trennen ihre P2P-Sitzung, sobald nichts mehr passiert.
+        Ein Befehl an eine schlafende Kamera wird vom Server ohne Fehler
+        angenommen und verschwindet dann - genau das Verhalten, bei dem
+        in Home Assistant scheinbar nichts geschieht.
+        """
+        station = self.station_for(serial)
+        lock = self._wake_locks.setdefault(station, asyncio.Lock())
+
+        async with lock:
+            if await self.async_station_connected(station):
+                return True
+
+            _LOGGER.debug("%s schlaeft - baue P2P-Sitzung auf", station)
+
+            try:
+                await self.async_send_command(
+                    {"command": "station.connect", "serialNumber": station}
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("connect fuer %s: %s", station, err)
+
+            wartezeit = 0.0
+            while wartezeit < WAKE_TIMEOUT:
+                await asyncio.sleep(WAKE_POLL)
+                wartezeit += WAKE_POLL
+                if await self.async_station_connected(station):
+                    _LOGGER.debug(
+                        "%s ist nach %.1f s wach", station, wartezeit
+                    )
+                    return True
+
+            _LOGGER.info(
+                "%s liess sich nicht aufwecken - Befehl wird trotzdem "
+                "geschickt",
+                station,
+            )
+            return False
+
+    # ------------------------------------------------------------------
     # Nachrichtenschleife
     # ------------------------------------------------------------------
 
@@ -459,7 +542,14 @@ class EufyMaxClient:
     async def async_set_property(
         self, serial: str, name: str, value: Any
     ) -> None:
-        """Eine Geraeteeigenschaft setzen."""
+        """Eine Geraeteeigenschaft setzen.
+
+        Vorher wird die Kamera geweckt. Ohne stehende P2P-Sitzung nimmt
+        der Server den Befehl zwar an, die Kamera bekommt ihn aber nie -
+        und in Home Assistant sieht es aus, als passiere einfach nichts.
+        """
+        await self.async_wake(serial)
+
         await self.async_send_command(
             {
                 "command": "device.set_property",
@@ -529,6 +619,7 @@ class EufyMaxClient:
 
     async def async_pan_and_tilt(self, serial: str, direction: int) -> None:
         """Kamera schwenken oder neigen."""
+        await self.async_wake(serial)
         await self.async_send_command(
             {
                 "command": "device.pan_and_tilt",
