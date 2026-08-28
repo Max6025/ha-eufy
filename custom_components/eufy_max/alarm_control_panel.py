@@ -1,15 +1,17 @@
 """Alarm Panels fuer Eufy Max.
 
 Ohne HomeBase ist jede Kamera ihre eigene Station und hat einen eigenen
-Guard Mode. Deshalb bekommt jede Kamera ein eigenes Panel, zusaetzlich
-gibt es ein Sammelpanel fuer alle Kameras gleichzeitig.
+Guard Mode. Deshalb bekommt jede Kamera ein eigenes Panel mit allen
+Modi der Eufy-App.
+
+Das Sammelpanel arbeitet anders: Es kennt nur Zuhause und Abwesend und
+setzt beim Umschalten NICHT alle Kameras auf denselben Modus, sondern
+stellt je Kamera den Modus wieder her, der fuer diese Lage gespeichert
+wurde (siehe profiles.py). Gespeichert wird ausschliesslich ueber den
+Knopf "Modi speichern".
 
 Ueber translation_key tragen die Panels die Modusnamen aus der Eufy-App
 statt der Standardtexte von Home Assistant.
-
-Modelle, die die Eufy-Bibliothek noch nicht kennt (z.B. eufyCam C37),
-lehnen sowohl guardMode als auch motionDetection ab. Fuer die gibt es
-eine verstaendliche Fehlermeldung statt eines Rohfehlers.
 """
 
 from __future__ import annotations
@@ -44,7 +46,10 @@ from .const import (
     GUARD_SCHEDULE,
     HUB_IDENTIFIER,
     MOTION_DETECTION_PROPERTY,
+    PROFILE_AWAY,
+    PROFILE_HOME,
     SIGNAL_DEVICE_UPDATE,
+    SIGNAL_PROFILE_UPDATE,
 )
 from .entity import EufyMaxEntity
 from .websocket import EufyMaxClient
@@ -63,12 +68,20 @@ MODE_TO_STATE = {
     GUARD_DISARMED: AlarmControlPanelState.DISARMED,
 }
 
+# Einzelne Kamera: alle Modi der Eufy-App
 SUPPORTED = (
     AlarmControlPanelEntityFeature.ARM_HOME
     | AlarmControlPanelEntityFeature.ARM_AWAY
     | AlarmControlPanelEntityFeature.ARM_NIGHT
     | AlarmControlPanelEntityFeature.ARM_VACATION
     | AlarmControlPanelEntityFeature.ARM_CUSTOM_BYPASS
+    | AlarmControlPanelEntityFeature.TRIGGER
+)
+
+# Sammelpanel: bewusst nur zwei Lagen plus Unscharf
+SUPPORTED_MASTER = (
+    AlarmControlPanelEntityFeature.ARM_HOME
+    | AlarmControlPanelEntityFeature.ARM_AWAY
     | AlarmControlPanelEntityFeature.TRIGGER
 )
 
@@ -155,8 +168,6 @@ class EufyMaxCameraAlarmPanel(EufyMaxEntity, AlarmControlPanelEntity):
         # Ersatzlogik: Bewegungserkennung als Scharfschaltung
         prop = self._fallback_property()
         if prop is None:
-            # Weder Guard Mode noch schaltbare Eigenschaft. Unbekannt ist
-            # ehrlicher als ein falsches "unscharf".
             return None
 
         if self.get_property(prop):
@@ -215,8 +226,7 @@ class EufyMaxCameraAlarmPanel(EufyMaxEntity, AlarmControlPanelEntity):
         modell = self.device.get("model", "unbekannt")
         raise HomeAssistantError(
             f"{name} ({modell}) laesst sich nicht schalten. Eufy lehnt den "
-            f"Befehl ab ({letzter_fehler}). Dieses Modell wird von "
-            "eufy-security-client noch nicht unterstuetzt."
+            f"Befehl ab ({letzter_fehler})."
         )
 
     async def async_alarm_disarm(self, code: str | None = None) -> None:
@@ -251,7 +261,12 @@ class EufyMaxCameraAlarmPanel(EufyMaxEntity, AlarmControlPanelEntity):
 
 
 class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
-    """Sammelpanel: schaltet alle Kameras gleichzeitig."""
+    """Sammelpanel: schaltet die ganze Anlage zwischen zwei Lagen um.
+
+    Beim Umschalten bekommt jede Kamera den Modus, der fuer diese Lage
+    gespeichert wurde - nicht alle denselben. Wurde noch nie gespeichert,
+    bekommen alle den Standardmodus der Lage.
+    """
 
     _attr_has_entity_name = True
     _attr_should_poll = False
@@ -259,11 +274,16 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
     _attr_unique_id = "eufy_max_master_alarm"
     _attr_icon = "mdi:shield-home"
     _attr_code_arm_required = False
-    _attr_supported_features = SUPPORTED
+    _attr_supported_features = SUPPORTED_MASTER
 
     def __init__(self, client: EufyMaxClient) -> None:
         """Panel initialisieren."""
         self.client = client
+
+    @property
+    def profile(self):
+        """Profilspeicher der Integration."""
+        return getattr(self.client, "profile", None)
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -282,7 +302,7 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
         return self.client.connected and self.client.driver_connected
 
     async def async_added_to_hass(self) -> None:
-        """Auf alle Stationen hoeren."""
+        """Auf alle Stationen und auf Profiländerungen hoeren."""
         for serial in self.client.stations:
             self.async_on_remove(
                 async_dispatcher_connect(
@@ -291,6 +311,11 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
                     self._handle_update,
                 )
             )
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, SIGNAL_PROFILE_UPDATE, self._handle_update
+            )
+        )
 
     @callback
     def _handle_update(self) -> None:
@@ -299,7 +324,21 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
 
     @property
     def alarm_state(self) -> AlarmControlPanelState | None:
-        """Gemeinsamer Zustand - nur einheitlich, wenn alle gleich sind."""
+        """Zustand ist die zuletzt angewandte Lage.
+
+        Bewusst nicht aus den Einzelmodi abgeleitet: Die duerfen ja
+        absichtlich unterschiedlich sein. Das Panel zeigt, in welcher
+        Lage die Anlage steht, nicht was jede Kamera einzeln tut.
+        """
+        profile = self.profile
+
+        if profile is not None and profile.aktiv == PROFILE_HOME:
+            return AlarmControlPanelState.ARMED_HOME
+        if profile is not None and profile.aktiv == PROFILE_AWAY:
+            return AlarmControlPanelState.ARMED_AWAY
+
+        # Noch nie umgeschaltet: aus den Stationen ableiten, damit das
+        # Panel nicht leer bleibt.
         modes = {
             self.client.get_station_property(serial, GUARD_MODE_PROPERTY)
             for serial in self.client.stations
@@ -308,70 +347,89 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
 
         if not modes:
             return None
-        if len(modes) == 1:
-            return MODE_TO_STATE.get(
-                int(next(iter(modes))), AlarmControlPanelState.DISARMED
-            )
-        if any(int(m) not in (GUARD_DISARMED, GUARD_OFF) for m in modes):
-            return AlarmControlPanelState.ARMED_CUSTOM_BYPASS
-        return AlarmControlPanelState.DISARMED
+        if all(int(m) in (GUARD_DISARMED, GUARD_OFF) for m in modes):
+            return AlarmControlPanelState.DISARMED
+        if all(int(m) == GUARD_HOME for m in modes):
+            return AlarmControlPanelState.ARMED_HOME
+        return AlarmControlPanelState.ARMED_AWAY
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Einzelmodi zur Kontrolle."""
-        return {
-            "stationen": {
-                serial: GUARD_MODE_NAMES.get(
-                    self.client.get_station_property(serial, GUARD_MODE_PROPERTY)
+        """Was gerade anliegt und was gespeichert ist."""
+        profile = self.profile
+        attribute: dict[str, Any] = {
+            "aktuelle_modi": {
+                self.client.get_station(serial).get("name", serial): (
+                    GUARD_MODE_NAMES.get(
+                        self.client.get_station_property(
+                            serial, GUARD_MODE_PROPERTY
+                        )
+                    )
                 )
                 for serial in self.client.stations
             }
         }
 
-    async def _async_set_all(self, mode: int) -> None:
-        """Modus auf allen Stationen setzen, die ihn annehmen."""
+        if profile is not None:
+            attribute["lage"] = profile.aktiv
+            attribute["profil_zuhause"] = profile.uebersicht(PROFILE_HOME)
+            attribute["profil_abwesend"] = profile.uebersicht(PROFILE_AWAY)
+            attribute["zuhause_gespeichert"] = profile.ist_gespeichert(
+                PROFILE_HOME
+            )
+            attribute["abwesend_gespeichert"] = profile.ist_gespeichert(
+                PROFILE_AWAY
+            )
+
+        return attribute
+
+    async def _async_lage(self, lage: str) -> None:
+        """Gespeichertes Profil einer Lage anwenden."""
+        profile = self.profile
+        if profile is None:
+            raise HomeAssistantError(
+                "Profilspeicher nicht bereit - Integration neu laden"
+            )
+
+        fehler = await profile.async_apply(lage)
+        self.async_write_ha_state()
+
+        if fehler and len(fehler) == len(self.client.stations):
+            raise HomeAssistantError(
+                "Keine Kamera hat den Wechsel angenommen: " + "; ".join(fehler)
+            )
+        if fehler:
+            _LOGGER.warning(
+                "Wechsel teilweise fehlgeschlagen: %s", "; ".join(fehler)
+            )
+
+    async def async_alarm_arm_home(self, code: str | None = None) -> None:
+        """Lage Zuhause herstellen."""
+        await self._async_lage(PROFILE_HOME)
+
+    async def async_alarm_arm_away(self, code: str | None = None) -> None:
+        """Lage Abwesend herstellen."""
+        await self._async_lage(PROFILE_AWAY)
+
+    async def async_alarm_disarm(self, code: str | None = None) -> None:
+        """Alle Kameras unscharf - ohne Profil, das ist immer eindeutig."""
         fehler: list[str] = []
         for serial in self.client.stations:
             try:
-                await self.client.async_set_guard_mode(serial, mode)
+                await self.client.async_set_guard_mode(serial, GUARD_DISARMED)
             except Exception as err:  # noqa: BLE001
                 fehler.append(f"{serial}: {err}")
+
+        profile = self.profile
+        if profile is not None:
+            profile.aktiv = None
 
         self.async_write_ha_state()
 
         if fehler and len(fehler) == len(self.client.stations):
             raise HomeAssistantError(
-                "Keine Station hat den Moduswechsel angenommen: "
-                + "; ".join(fehler)
+                "Keine Kamera hat den Wechsel angenommen: " + "; ".join(fehler)
             )
-        if fehler:
-            _LOGGER.warning(
-                "Moduswechsel teilweise fehlgeschlagen: %s", "; ".join(fehler)
-            )
-
-    async def async_alarm_disarm(self, code: str | None = None) -> None:
-        """Alles unscharf."""
-        await self._async_set_all(GUARD_DISARMED)
-
-    async def async_alarm_arm_away(self, code: str | None = None) -> None:
-        """Alles auf abwesend."""
-        await self._async_set_all(GUARD_AWAY)
-
-    async def async_alarm_arm_home(self, code: str | None = None) -> None:
-        """Alles auf zuhause."""
-        await self._async_set_all(GUARD_HOME)
-
-    async def async_alarm_arm_night(self, code: str | None = None) -> None:
-        """Alles auf den ersten eigenen Modus."""
-        await self._async_set_all(GUARD_CUSTOM1)
-
-    async def async_alarm_arm_vacation(self, code: str | None = None) -> None:
-        """Alles auf den zweiten eigenen Modus."""
-        await self._async_set_all(GUARD_CUSTOM2)
-
-    async def async_alarm_arm_custom_bypass(self, code: str | None = None) -> None:
-        """Alles auf Zeitplan."""
-        await self._async_set_all(GUARD_SCHEDULE)
 
     async def async_alarm_trigger(self, code: str | None = None) -> None:
         """Alle Sirenen ausloesen."""

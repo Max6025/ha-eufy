@@ -1,16 +1,32 @@
-"""Buttons: Livestream-Steuerung, Schwenken, Neigen, Alarm."""
+"""Buttons: Livestream-Steuerung, Schwenken, Neigen, Alarm, Modi speichern."""
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, PTZ_DIRECTIONS
+from .const import (
+    DOMAIN,
+    GUARD_MODE_NAMES,
+    HUB_IDENTIFIER,
+    PROFILE_AWAY,
+    PROFILE_HOME,
+    PROFILE_NAMES,
+    PTZ_DIRECTIONS,
+    SIGNAL_PROFILE_UPDATE,
+)
 from .controller_entity import EufyMaxControllerEntity
 from .entity import EufyMaxEntity
 from .websocket import EufyMaxClient
+
+_LOGGER = logging.getLogger(__name__)
 
 PTZ_LABELS = {
     "left": "Schwenken links",
@@ -30,6 +46,9 @@ async def async_setup_entry(
     entities: list[ButtonEntity] = [
         EufyMaxStartStreamButton(controller),
         EufyMaxStopStreamButton(controller),
+        EufyMaxSaveProfileButton(client),
+        EufyMaxSaveProfileButton(client, PROFILE_HOME),
+        EufyMaxSaveProfileButton(client, PROFILE_AWAY),
     ]
 
     for serial in client.devices:
@@ -66,6 +85,105 @@ class EufyMaxStopStreamButton(EufyMaxControllerEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Alle Kameras stoppen."""
         await self.controller.async_stop()
+
+
+class EufyMaxSaveProfileButton(ButtonEntity):
+    """Speichert die aktuellen Modi aller Kameras als Profil.
+
+    Drei Knoepfe: einer speichert in die Lage, auf der das Sammelpanel
+    gerade steht - das ist der normale Weg. Die beiden anderen schreiben
+    ausdruecklich nach Zuhause oder Abwesend, falls man ein Profil
+    einrichten will, ohne vorher umzuschalten.
+
+    Gespeichert wird ausschliesslich hier. Wer eine Kamera nachtraeglich
+    umstellt, aendert das Profil nicht.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_icon = "mdi:content-save-cog"
+
+    def __init__(self, client: EufyMaxClient, lage: str | None = None) -> None:
+        """Knopf initialisieren."""
+        self.client = client
+        self.lage = lage
+
+        if lage is None:
+            self._attr_name = "Modi speichern"
+            self._attr_unique_id = "eufy_max_save_profile"
+        else:
+            self._attr_name = f"Modi speichern als {PROFILE_NAMES[lage]}"
+            self._attr_unique_id = f"eufy_max_save_profile_{lage}"
+
+    @property
+    def profile(self):
+        """Profilspeicher der Integration."""
+        return getattr(self.client, "profile", None)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Gehoert zum Steuerungsgeraet."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, HUB_IDENTIFIER)},
+            name="Eufy Max Steuerung",
+            manufacturer="Max",
+            model="Livestream Controller",
+            entry_type="service",
+        )
+
+    @property
+    def available(self) -> bool:
+        """Verfuegbar, solange die Verbindung steht."""
+        return self.client.connected and self.client.driver_connected
+
+    async def async_added_to_hass(self) -> None:
+        """Auf Profiländerungen hoeren, damit die Attribute stimmen."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, SIGNAL_PROFILE_UPDATE, self._handle_update
+            )
+        )
+
+    @callback
+    def _handle_update(self) -> None:
+        """Neu zeichnen."""
+        self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Zeigt, wohin gespeichert wird und was dort steht."""
+        profile = self.profile
+        if profile is None:
+            return {}
+
+        ziel = self.lage or profile.aktiv or PROFILE_HOME
+        return {
+            "ziel": PROFILE_NAMES.get(ziel, ziel),
+            "gespeichert": profile.uebersicht(ziel),
+        }
+
+    async def async_press(self) -> None:
+        """Aktuelle Modi ablegen."""
+        profile = self.profile
+        if profile is None:
+            raise HomeAssistantError(
+                "Profilspeicher nicht bereit - Integration neu laden"
+            )
+
+        modi = await profile.async_save(self.lage)
+
+        if not modi:
+            raise HomeAssistantError(
+                "Keine Kamera hat einen Modus gemeldet - nichts gespeichert"
+            )
+
+        ziel = self.lage or profile.aktiv
+        _LOGGER.info(
+            "%s Kamera(s) fuer '%s' gespeichert",
+            len(modi),
+            PROFILE_NAMES.get(ziel, ziel),
+        )
+        self.async_write_ha_state()
 
 
 class EufyMaxPtzButton(EufyMaxEntity, ButtonEntity):
