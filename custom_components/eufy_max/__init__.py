@@ -17,6 +17,7 @@ from .const import (
     ATTR_CAPTCHA,
     ATTR_CAPTCHA_ID,
     ATTR_DIRECTION,
+    ATTR_PROFILE,
     ATTR_PROPERTY,
     ATTR_VALUE,
     ATTR_VERIFY_CODE,
@@ -27,9 +28,12 @@ from .const import (
     DEFAULT_PORT,
     DOMAIN,
     PLATFORMS,
+    PROFILE_AWAY,
+    PROFILE_HOME,
     PTZ_DIRECTIONS,
     SERVICE_PTZ,
     SERVICE_RECONNECT,
+    SERVICE_SAVE_PROFILE,
     SERVICE_SET_CAPTCHA,
     SERVICE_SET_PROPERTY,
     SERVICE_SET_VERIFY_CODE,
@@ -42,6 +46,7 @@ from .const import (
     ATTR_DURATION,
     SIGNAL_DEVICE_UPDATE,
 )
+from .profiles import ModusProfile
 from .stream import StreamController
 from .websocket import EufyMaxClient, EufyMaxError
 
@@ -67,6 +72,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Zentraler Livestream-Controller haengt am Client, damit alle
     # Plattformen ihn ueber client.stream erreichen.
     client.stream = StreamController(hass, client)
+
+    # Modus-Profile fuer das Sammelpanel. Muss vor dem Anlegen der
+    # Entities geladen sein, sonst zeigt das Panel beim Start eine
+    # falsche Lage.
+    client.profile = ModusProfile(hass, client)
+    await client.profile.async_load()
 
     # Standard ist der P2P-Weg: die von den Kameras gemeldeten
     # RTSP-Adressen stimmen nicht immer, der P2P-Strom dagegen schon.
@@ -310,6 +321,27 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 vol.Optional("entity_id"): cv.entity_ids,
                 vol.Required(ATTR_GUARD_MODE): vol.All(int, vol.In([0, 1, 2, 3, 4, 5, 6, 47, 63])),
             }
+        ),
+    )
+
+    async def handle_save_profile(call: ServiceCall) -> None:
+        """Aktuelle Modi als Profil speichern.
+
+        Ohne Angabe wird in die Lage gespeichert, auf der das
+        Sammelpanel gerade steht.
+        """
+        client = _get_client(hass)
+        profile = getattr(client, "profile", None)
+        if profile is None:
+            raise EufyMaxError("Profilspeicher nicht bereit")
+        await profile.async_save(call.data.get(ATTR_PROFILE))
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SAVE_PROFILE,
+        handle_save_profile,
+        schema=vol.Schema(
+            {vol.Optional(ATTR_PROFILE): vol.In([PROFILE_HOME, PROFILE_AWAY])}
         ),
     )
 
