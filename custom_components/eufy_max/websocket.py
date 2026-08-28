@@ -18,6 +18,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     COMMAND_TIMEOUT,
+    DOMAIN,
     HEARTBEAT_INTERVAL,
     MAX_SCHEMA_VERSION,
     RECONNECT_MAX_DELAY,
@@ -79,6 +80,7 @@ class EufyMaxClient:
         self._reader: asyncio.Task | None = None
         self._disconnected = asyncio.Event()
         self._closing: bool = False
+        self._refreshing: bool = False
 
     # ------------------------------------------------------------------
     # Verbindungsaufbau und Watchdog
@@ -128,12 +130,7 @@ class EufyMaxClient:
         self.connected = False
 
     async def _async_watchdog(self) -> None:
-        """Haelt die Verbindung dauerhaft am Leben.
-
-        Wartet darauf, dass die Leseschleife das Ende der Verbindung
-        meldet, und verbindet dann mit wachsendem Abstand endlos neu,
-        statt die Entities dauerhaft auf 'unavailable' stehen zu lassen.
-        """
+        """Haelt die Verbindung dauerhaft am Leben."""
         delay = RECONNECT_MIN_DELAY
 
         while not self._closing:
@@ -162,7 +159,6 @@ class EufyMaxClient:
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Reconnect fehlgeschlagen: %s", err)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
-                # Erneut ausloesen, damit die Schleife weiterlaeuft.
                 self._disconnected.set()
             else:
                 delay = RECONNECT_MIN_DELAY
@@ -210,13 +206,7 @@ class EufyMaxClient:
         self._notify_all()
 
     async def _async_load_state(self, state: dict[str, Any]) -> None:
-        """Geraete und Stationen aus start_listening uebernehmen.
-
-        Ab Schema 13 liefert der Server in 'devices' und 'stations' nur
-        noch Seriennummern als Strings. Die Eigenschaften muessen dann
-        einzeln per get_properties nachgeladen werden. Aeltere Schemas
-        liefern vollstaendige Objekte - beides wird hier abgedeckt.
-        """
+        """Geraete und Stationen aus start_listening uebernehmen."""
         driver = state.get("driver", {})
         self.driver_connected = bool(driver.get("connected", False))
 
@@ -243,14 +233,13 @@ class EufyMaxClient:
         if not self.driver_connected:
             _LOGGER.warning(
                 "Treiber ist nicht mit der Eufy-Cloud verbunden - "
-                "vermutlich Captcha oder 2FA offen"
+                "vermutlich Captcha, 2FA oder abgelaufene Sitzung"
             )
             await self._async_send_command(
                 {"command": "driver.connect"}, wait_for_ws=False
             )
 
         # Eigenschaften, Metadaten und Befehle je Geraet nachladen.
-        # Daraus werden spaeter die Entities generiert.
         for serial in list(self.devices):
             await self._async_load_device_details(serial)
 
@@ -300,10 +289,7 @@ class EufyMaxClient:
         )
 
     async def _async_load_station_details(self, serial: str) -> None:
-        """Eigenschaften und Metadaten einer Station laden.
-
-        Liefert unter anderem den Guard Mode und dessen erlaubte Werte.
-        """
+        """Eigenschaften und Metadaten einer Station laden."""
         try:
             props = await self._async_send_command(
                 {"command": "station.get_properties", "serialNumber": serial},
@@ -329,6 +315,60 @@ class EufyMaxClient:
                 "Stationsmetadaten fuer %s nicht ladbar: %s", serial, err
             )
             self.station_metadata[serial] = {}
+
+    # ------------------------------------------------------------------
+    # Nachtraegliche Anmeldung
+    # ------------------------------------------------------------------
+
+    async def _async_refresh_after_login(self) -> None:
+        """Geraeteliste nachladen, wenn sich der Treiber spaeter anmeldet.
+
+        Wenn das Add-on beim Start noch nicht bei Eufy angemeldet ist -
+        etwa nach einer abgelaufenen Sitzung -, liefert start_listening
+        eine leere Liste. Frueher blieb es dann dabei, solange die
+        WebSocket-Verbindung stand: keine Geraete, alle Entities auf
+        'nicht verfuegbar', und nur ein Neuladen von Hand half.
+
+        Jetzt wird die Liste neu geholt, sobald die Anmeldung klappt.
+        Kommen dabei Geraete dazu, die es vorher nicht gab, muessen auch
+        die Entities neu gebaut werden - dafuer wird der Eintrag neu
+        geladen.
+        """
+        if self._refreshing:
+            return
+
+        self._refreshing = True
+        try:
+            vorher = set(self.devices)
+
+            try:
+                result = await self._async_send_command(
+                    {"command": "start_listening"}
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Nachladen nach Anmeldung fehlgeschlagen: %s", err)
+                return
+
+            await self._async_load_state(result.get("state", {}))
+            self._notify_all()
+
+            neu = set(self.devices) - vorher
+            if not neu:
+                return
+
+            _LOGGER.info(
+                "Nach der Anmeldung sind %s Geraet(e) dazugekommen - "
+                "Integration wird neu geladen",
+                len(neu),
+            )
+
+            entries = self.hass.config_entries.async_entries(DOMAIN)
+            if entries:
+                self.hass.async_create_task(
+                    self.hass.config_entries.async_reload(entries[0].entry_id)
+                )
+        finally:
+            self._refreshing = False
 
     # ------------------------------------------------------------------
     # Akkukameras aufwecken
@@ -364,8 +404,7 @@ class EufyMaxClient:
 
         Akkukameras trennen ihre P2P-Sitzung, sobald nichts mehr passiert.
         Ein Befehl an eine schlafende Kamera wird vom Server ohne Fehler
-        angenommen und verschwindet dann - genau das Verhalten, bei dem
-        in Home Assistant scheinbar nichts geschieht.
+        angenommen und verschwindet dann.
         """
         station = self.station_for(serial)
         lock = self._wake_locks.setdefault(station, asyncio.Lock())
@@ -402,11 +441,7 @@ class EufyMaxClient:
     # ------------------------------------------------------------------
 
     async def _async_reader(self) -> None:
-        """Eingehende Nachrichten verarbeiten, bis die Verbindung endet.
-
-        Laeuft als eigener Task ab dem Moment, in dem die Verbindung
-        steht - also auch waehrend der Anmeldebefehle.
-        """
+        """Eingehende Nachrichten verarbeiten, bis die Verbindung endet."""
         try:
             if self._ws is None:
                 return
@@ -429,7 +464,6 @@ class EufyMaxClient:
             _LOGGER.debug("Leseschleife beendet: %s", err)
         finally:
             self.connected = False
-            # Wartende Befehle nicht ins Timeout laufen lassen.
             for future in self._futures.values():
                 if not future.done():
                     future.set_exception(EufyMaxError("Verbindung verloren"))
@@ -465,8 +499,15 @@ class EufyMaxClient:
 
         if source == "driver":
             if name == "connected":
+                war_verbunden = self.driver_connected
                 self.driver_connected = True
                 self._notify_all()
+                # Beim Start war moeglicherweise noch keine Anmeldung da
+                # und die Geraeteliste blieb leer. Jetzt nachladen.
+                if not war_verbunden or not self.devices:
+                    self.hass.async_create_task(
+                        self._async_refresh_after_login()
+                    )
             elif name == "disconnected":
                 self.driver_connected = False
                 self._notify_all()
@@ -476,23 +517,19 @@ class EufyMaxClient:
             return
 
         if source in ("device", "station") and serial:
-            # Rohe Videodaten des P2P-Streams direkt an die Bruecke geben,
-            # ohne den Umweg ueber den Geraetezustand. Das sind viele
-            # kleine Pakete pro Sekunde.
+            # Rohe Videodaten des P2P-Streams direkt an die Bruecke geben.
             if name == "livestream video data":
                 handler = self._video_handlers.get(serial)
                 if handler is not None:
                     buffer = event.get("buffer")
                     data = buffer.get("data") if isinstance(buffer, dict) else None
                     if data:
-                        # Der Codec steht in jedem Paket mit drin und
-                        # entscheidet, wie ffmpeg gestartet werden muss.
                         metadata = event.get("metadata") or {}
                         codec = metadata.get("videoCodec")
                         try:
                             handler(bytes(data), codec)
                         except Exception:  # noqa: BLE001
-                            _LOGGER.debug("Videodaten konnten nicht uebergeben werden")
+                            _LOGGER.debug("Videodaten nicht uebergebbar")
                 return
 
             if name == "livestream audio data":
@@ -556,8 +593,7 @@ class EufyMaxClient:
         """Eine Geraeteeigenschaft setzen.
 
         Vorher wird die Kamera geweckt. Ohne stehende P2P-Sitzung nimmt
-        der Server den Befehl zwar an, die Kamera bekommt ihn aber nie -
-        und in Home Assistant sieht es aus, als passiere einfach nichts.
+        der Server den Befehl zwar an, die Kamera bekommt ihn aber nie.
         """
         await self.async_wake(serial)
 
@@ -569,7 +605,6 @@ class EufyMaxClient:
                 "value": value,
             }
         )
-        # Optimistisch schon lokal setzen, das Event bestaetigt gleich.
         if serial in self.devices:
             self.devices[serial][name] = value
             self._notify(serial, name)
@@ -596,8 +631,7 @@ class EufyMaxClient:
         Ab Schema 13 kennt eufy-security-ws den Befehl
         station.set_guard_mode nicht mehr - er antwortet dann mit
         unknown_command. Der Modus wird seitdem als Stationseigenschaft
-        'guardMode' gesetzt. Beide Wege sind hier abgedeckt, damit die
-        Integration auch mit aelteren Serverversionen laeuft.
+        'guardMode' gesetzt.
         """
         mode = int(mode)
 
@@ -695,8 +729,9 @@ class EufyMaxClient:
         )
 
     async def async_reconnect(self) -> None:
-        """Verbindung zur Eufy-Cloud neu aufbauen."""
+        """Verbindung zur Eufy-Cloud neu aufbauen und Liste nachladen."""
         await self.async_send_command({"command": "driver.connect"})
+        await self._async_refresh_after_login()
 
     # ------------------------------------------------------------------
     # Hilfsfunktionen
@@ -715,12 +750,7 @@ class EufyMaxClient:
         return self.metadata.get(serial, {})
 
     def has_command(self, serial: str, command: str) -> bool:
-        """Pruefen, ob ein Geraet einen Befehl unterstuetzt.
-
-        Der Server liefert die Namen ohne Praefix und in snake_case,
-        also 'start_livestream' statt 'device.start_livestream'. Hier
-        werden beide Schreibweisen akzeptiert.
-        """
+        """Pruefen, ob ein Geraet einen Befehl unterstuetzt."""
         available = self.commands.get(serial, [])
         wanted = command.split(".")[-1]
         return any(entry.split(".")[-1] == wanted for entry in available)
