@@ -144,3 +144,27 @@ GUARD_MODE_NAMES = {
     GUARD_GEO: "geofence",
     GUARD_DISARMED: "unscharf",
 }
+
+
+# ----------------------------------------------------------------------
+# Modus-Profile fuer das Sammelpanel
+# ----------------------------------------------------------------------
+#
+# Das Sammelpanel kennt nur zwei Lagen. Welchen Modus die einzelne Kamera
+# in der jeweiligen Lage bekommt, steht im Profil - siehe profiles.py.
+
+PROFILE_HOME = "zuhause"
+PROFILE_AWAY = "abwesend"
+
+PROFILE_NAMES = {
+    PROFILE_HOME: "Zuhause",
+    PROFILE_AWAY: "Abwesend",
+}
+
+STORAGE_KEY = f"{DOMAIN}_profile"
+STORAGE_VERSION = 1
+
+SIGNAL_PROFILE_UPDATE = f"{DOMAIN}_profile_update"
+
+SERVICE_SAVE_PROFILE = "save_profile"
+ATTR_PROFILE = "profile"
