@@ -1,0 +1,32 @@
+    async def async_set_guard_mode(self, serial: str, mode: int) -> None:
+        """Guard Mode einer Station bzw. einer eigenstaendigen Kamera setzen.
+
+        Ab Schema 13 hat eufy-security-ws den Befehl station.set_guard_mode
+        entfernt - er antwortet dann mit unknown_command. Der Modus wird
+        seitdem als Stationseigenschaft 'guardMode' gesetzt. Beide Wege
+        sind hier abgedeckt, damit die Integration auch mit aelteren
+        Serverversionen laeuft.
+        """
+        mode = int(mode)
+
+        if self.schema_version >= 13:
+            await self.async_send_command(
+                {
+                    "command": "station.set_property",
+                    "serialNumber": serial,
+                    "name": "guardMode",
+                    "value": mode,
+                }
+            )
+        else:
+            await self.async_send_command(
+                {
+                    "command": "station.set_guard_mode",
+                    "serialNumber": serial,
+                    "mode": mode,
+                }
+            )
+
+        if serial in self.stations:
+            self.stations[serial]["guardMode"] = mode
+            self._notify(serial, "guardMode")
