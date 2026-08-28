@@ -59,6 +59,7 @@ class EufyMaxClient:
         self.devices: dict[str, dict[str, Any]] = {}
         self.stations: dict[str, dict[str, Any]] = {}
         self.metadata: dict[str, dict[str, Any]] = {}
+        self.station_metadata: dict[str, dict[str, Any]] = {}
         self.commands: dict[str, list[str]] = {}
 
         self._session: aiohttp.ClientSession | None = None
@@ -299,7 +300,10 @@ class EufyMaxClient:
         )
 
     async def _async_load_station_details(self, serial: str) -> None:
-        """Eigenschaften einer Station laden - liefert den Guard Mode."""
+        """Eigenschaften und Metadaten einer Station laden.
+
+        Liefert unter anderem den Guard Mode und dessen erlaubte Werte.
+        """
         try:
             props = await self._async_send_command(
                 {"command": "station.get_properties", "serialNumber": serial},
@@ -310,6 +314,21 @@ class EufyMaxClient:
             _LOGGER.debug(
                 "Stationseigenschaften fuer %s nicht ladbar: %s", serial, err
             )
+
+        try:
+            meta = await self._async_send_command(
+                {
+                    "command": "station.get_properties_metadata",
+                    "serialNumber": serial,
+                },
+                wait_for_ws=False,
+            )
+            self.station_metadata[serial] = meta.get("properties", {})
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Stationsmetadaten fuer %s nicht ladbar: %s", serial, err
+            )
+            self.station_metadata[serial] = {}
 
     # ------------------------------------------------------------------
     # Akkukameras aufwecken
@@ -338,11 +357,6 @@ class EufyMaxClient:
             _LOGGER.debug("is_connected fuer %s: %s", station, err)
             return False
 
-        # Je nach Schema heisst das Feld anders.
-        for key in ("connected", "serialNumber", "result"):
-            value = result.get(key)
-            if isinstance(value, bool):
-                return value
         return bool(result.get("connected", False))
 
     async def async_wake(self, serial: str) -> bool:
@@ -374,14 +388,11 @@ class EufyMaxClient:
                 await asyncio.sleep(WAKE_POLL)
                 wartezeit += WAKE_POLL
                 if await self.async_station_connected(station):
-                    _LOGGER.debug(
-                        "%s ist nach %.1f s wach", station, wartezeit
-                    )
+                    _LOGGER.debug("%s ist nach %.1f s wach", station, wartezeit)
                     return True
 
             _LOGGER.info(
-                "%s liess sich nicht aufwecken - Befehl wird trotzdem "
-                "geschickt",
+                "%s liess sich nicht aufwecken - Befehl wird trotzdem geschickt",
                 station,
             )
             return False
@@ -575,18 +586,41 @@ class EufyMaxClient:
                 "value": value,
             }
         )
+        if serial in self.stations:
+            self.stations[serial][name] = value
+            self._notify(serial, name)
 
     async def async_set_guard_mode(self, serial: str, mode: int) -> None:
-        """Guard Mode einer Station bzw. einer eigenstaendigen Kamera setzen."""
-        await self.async_send_command(
-            {
-                "command": "station.set_guard_mode",
-                "serialNumber": serial,
-                "mode": int(mode),
-            }
-        )
+        """Guard Mode einer Station bzw. einer eigenstaendigen Kamera setzen.
+
+        Ab Schema 13 kennt eufy-security-ws den Befehl
+        station.set_guard_mode nicht mehr - er antwortet dann mit
+        unknown_command. Der Modus wird seitdem als Stationseigenschaft
+        'guardMode' gesetzt. Beide Wege sind hier abgedeckt, damit die
+        Integration auch mit aelteren Serverversionen laeuft.
+        """
+        mode = int(mode)
+
+        if self.schema_version >= 13:
+            await self.async_send_command(
+                {
+                    "command": "station.set_property",
+                    "serialNumber": serial,
+                    "name": "guardMode",
+                    "value": mode,
+                }
+            )
+        else:
+            await self.async_send_command(
+                {
+                    "command": "station.set_guard_mode",
+                    "serialNumber": serial,
+                    "mode": mode,
+                }
+            )
+
         if serial in self.stations:
-            self.stations[serial]["guardMode"] = int(mode)
+            self.stations[serial]["guardMode"] = mode
             self._notify(serial, "guardMode")
 
     async def async_trigger_station_alarm(
@@ -616,6 +650,10 @@ class EufyMaxClient:
     ) -> Any:
         """Einzelne Stationseigenschaft holen."""
         return self.stations.get(serial, {}).get(name, default)
+
+    def get_station_metadata(self, serial: str) -> dict[str, Any]:
+        """Property-Metadaten einer Station holen."""
+        return self.station_metadata.get(serial, {})
 
     async def async_pan_and_tilt(self, serial: str, direction: int) -> None:
         """Kamera schwenken oder neigen."""
