@@ -150,21 +150,31 @@ GUARD_MODE_NAMES = {
 # Modus-Profile fuer das Sammelpanel
 # ----------------------------------------------------------------------
 #
-# Das Sammelpanel kennt nur zwei Lagen. Welchen Modus die einzelne Kamera
-# in der jeweiligen Lage bekommt, steht im Profil - siehe profiles.py.
+# Das Sammelpanel kennt drei Lagen. Welchen Modus die einzelne Kamera in
+# der jeweiligen Lage bekommt, steht im Profil - siehe profiles.py.
 
 PROFILE_HOME = "zuhause"
 PROFILE_AWAY = "abwesend"
+PROFILE_SLEEP = "schlafen"
+
+PROFILE_LAGEN = (PROFILE_HOME, PROFILE_AWAY, PROFILE_SLEEP)
 
 PROFILE_NAMES = {
     PROFILE_HOME: "Zuhause",
     PROFILE_AWAY: "Abwesend",
+    PROFILE_SLEEP: "Schlafen",
 }
 
 STORAGE_KEY = f"{DOMAIN}_profile"
 STORAGE_VERSION = 1
 
 SIGNAL_PROFILE_UPDATE = f"{DOMAIN}_profile_update"
+SIGNAL_ARM_STATE = f"{DOMAIN}_arm_state"
 
 SERVICE_SAVE_PROFILE = "save_profile"
 ATTR_PROFILE = "profile"
+
+# Vorlaufzeit, bevor scharf geschaltet wird (Sekunden). 0 heisst sofort.
+DEFAULT_ARM_DELAY = 0
+MIN_ARM_DELAY = 0
+MAX_ARM_DELAY = 300
