@@ -1,17 +1,18 @@
 """Alarm Panels fuer Eufy Max.
 
 Ohne HomeBase ist jede Kamera ihre eigene Station und hat einen eigenen
-Guard Mode. Deshalb bekommt jede Kamera ein eigenes Panel mit allen
-Modi der Eufy-App.
+Guard Mode. Deshalb bekommt jede Kamera ein eigenes Panel mit allen Modi
+der Eufy-App - daran aendert sich nichts.
 
-Das Sammelpanel arbeitet anders: Es kennt nur Zuhause und Abwesend und
-setzt beim Umschalten NICHT alle Kameras auf denselben Modus, sondern
-stellt je Kamera den Modus wieder her, der fuer diese Lage gespeichert
-wurde (siehe profiles.py). Gespeichert wird ausschliesslich ueber den
-Knopf "Modi speichern".
+Das Sammelpanel arbeitet anders. Es kennt drei Lagen (Zuhause, Abwesend,
+Schlafen) und setzt beim Umschalten NICHT alle Kameras auf denselben
+Modus, sondern stellt je Kamera den gespeicherten Modus wieder her.
+Gespeichert wird ausschliesslich ueber die Knoepfe am Steuerungsgeraet.
 
-Ueber translation_key tragen die Panels die Modusnamen aus der Eufy-App
-statt der Standardtexte von Home Assistant.
+Ist am Steuerungsgeraet eine Vorlaufzeit eingestellt, geht das Panel nach
+dem Druck zuerst in "Wird scharf geschaltet"; erst nach Ablauf werden die
+Modi gesetzt. Unscharf wirkt immer sofort und bricht eine laufende
+Vorlaufzeit ab.
 """
 
 from __future__ import annotations
@@ -48,6 +49,9 @@ from .const import (
     MOTION_DETECTION_PROPERTY,
     PROFILE_AWAY,
     PROFILE_HOME,
+    PROFILE_LAGEN,
+    PROFILE_SLEEP,
+    SIGNAL_ARM_STATE,
     SIGNAL_DEVICE_UPDATE,
     SIGNAL_PROFILE_UPDATE,
 )
@@ -68,6 +72,13 @@ MODE_TO_STATE = {
     GUARD_DISARMED: AlarmControlPanelState.DISARMED,
 }
 
+# Lage des Sammelpanels -> HA-Zustand und zurueck
+LAGE_TO_STATE = {
+    PROFILE_HOME: AlarmControlPanelState.ARMED_HOME,
+    PROFILE_AWAY: AlarmControlPanelState.ARMED_AWAY,
+    PROFILE_SLEEP: AlarmControlPanelState.ARMED_NIGHT,
+}
+
 # Einzelne Kamera: alle Modi der Eufy-App
 SUPPORTED = (
     AlarmControlPanelEntityFeature.ARM_HOME
@@ -78,10 +89,11 @@ SUPPORTED = (
     | AlarmControlPanelEntityFeature.TRIGGER
 )
 
-# Sammelpanel: bewusst nur zwei Lagen plus Unscharf
+# Sammelpanel: drei Lagen plus Unscharf
 SUPPORTED_MASTER = (
     AlarmControlPanelEntityFeature.ARM_HOME
     | AlarmControlPanelEntityFeature.ARM_AWAY
+    | AlarmControlPanelEntityFeature.ARM_NIGHT
     | AlarmControlPanelEntityFeature.TRIGGER
 )
 
@@ -165,7 +177,6 @@ class EufyMaxCameraAlarmPanel(EufyMaxEntity, AlarmControlPanelEntity):
                     int(mode), AlarmControlPanelState.DISARMED
                 )
 
-        # Ersatzlogik: Bewegungserkennung als Scharfschaltung
         prop = self._fallback_property()
         if prop is None:
             return None
@@ -261,12 +272,7 @@ class EufyMaxCameraAlarmPanel(EufyMaxEntity, AlarmControlPanelEntity):
 
 
 class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
-    """Sammelpanel: schaltet die ganze Anlage zwischen zwei Lagen um.
-
-    Beim Umschalten bekommt jede Kamera den Modus, der fuer diese Lage
-    gespeichert wurde - nicht alle denselben. Wurde noch nie gespeichert,
-    bekommen alle den Standardmodus der Lage.
-    """
+    """Sammelpanel: schaltet die ganze Anlage zwischen den Lagen um."""
 
     _attr_has_entity_name = True
     _attr_should_poll = False
@@ -302,7 +308,7 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
         return self.client.connected and self.client.driver_connected
 
     async def async_added_to_hass(self) -> None:
-        """Auf alle Stationen und auf Profiländerungen hoeren."""
+        """Auf Stationen, Profile und den Scharfschaltvorgang hoeren."""
         for serial in self.client.stations:
             self.async_on_remove(
                 async_dispatcher_connect(
@@ -311,11 +317,10 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
                     self._handle_update,
                 )
             )
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass, SIGNAL_PROFILE_UPDATE, self._handle_update
+        for signal in (SIGNAL_PROFILE_UPDATE, SIGNAL_ARM_STATE):
+            self.async_on_remove(
+                async_dispatcher_connect(self.hass, signal, self._handle_update)
             )
-        )
 
     @callback
     def _handle_update(self) -> None:
@@ -326,16 +331,17 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
     def alarm_state(self) -> AlarmControlPanelState | None:
         """Zustand ist die zuletzt angewandte Lage.
 
-        Bewusst nicht aus den Einzelmodi abgeleitet: Die duerfen ja
-        absichtlich unterschiedlich sein. Das Panel zeigt, in welcher
-        Lage die Anlage steht, nicht was jede Kamera einzeln tut.
+        Waehrend einer laufenden Vorlaufzeit steht das Panel auf
+        "Wird scharf geschaltet". Bewusst nicht aus den Einzelmodi
+        abgeleitet: Die duerfen ja absichtlich unterschiedlich sein.
         """
         profile = self.profile
 
-        if profile is not None and profile.aktiv == PROFILE_HOME:
-            return AlarmControlPanelState.ARMED_HOME
-        if profile is not None and profile.aktiv == PROFILE_AWAY:
-            return AlarmControlPanelState.ARMED_AWAY
+        if profile is not None and profile.laeuft:
+            return AlarmControlPanelState.ARMING
+
+        if profile is not None and profile.aktiv in LAGE_TO_STATE:
+            return LAGE_TO_STATE[profile.aktiv]
 
         # Noch nie umgeschaltet: aus den Stationen ableiten, damit das
         # Panel nicht leer bleibt.
@@ -355,7 +361,7 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Was gerade anliegt und was gespeichert ist."""
+        """Was gerade anliegt, was gespeichert ist, was laeuft."""
         profile = self.profile
         attribute: dict[str, Any] = {
             "aktuelle_modi": {
@@ -372,26 +378,23 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
 
         if profile is not None:
             attribute["lage"] = profile.aktiv
-            attribute["profil_zuhause"] = profile.uebersicht(PROFILE_HOME)
-            attribute["profil_abwesend"] = profile.uebersicht(PROFILE_AWAY)
-            attribute["zuhause_gespeichert"] = profile.ist_gespeichert(
-                PROFILE_HOME
-            )
-            attribute["abwesend_gespeichert"] = profile.ist_gespeichert(
-                PROFILE_AWAY
-            )
+            attribute["vorlaufzeit"] = profile.verzoegerung
+            attribute["restzeit"] = profile.restzeit
+            attribute["wird_geschaltet_auf"] = profile.pending_lage
+            for lage in PROFILE_LAGEN:
+                attribute[f"profil_{lage}"] = profile.uebersicht(lage)
 
         return attribute
 
     async def _async_lage(self, lage: str) -> None:
-        """Gespeichertes Profil einer Lage anwenden."""
+        """Lage anfordern - mit Vorlaufzeit, falls eingestellt."""
         profile = self.profile
         if profile is None:
             raise HomeAssistantError(
                 "Profilspeicher nicht bereit - Integration neu laden"
             )
 
-        fehler = await profile.async_apply(lage)
+        fehler = await profile.async_request(lage)
         self.async_write_ha_state()
 
         if fehler and len(fehler) == len(self.client.stations):
@@ -411,8 +414,18 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
         """Lage Abwesend herstellen."""
         await self._async_lage(PROFILE_AWAY)
 
+    async def async_alarm_arm_night(self, code: str | None = None) -> None:
+        """Lage Schlafen herstellen."""
+        await self._async_lage(PROFILE_SLEEP)
+
     async def async_alarm_disarm(self, code: str | None = None) -> None:
-        """Alle Kameras unscharf - ohne Profil, das ist immer eindeutig."""
+        """Alle Kameras unscharf - sofort, ohne Vorlaufzeit."""
+        profile = self.profile
+        if profile is not None:
+            # Eine laufende Vorlaufzeit abbrechen: Wer entschaerft, will
+            # nicht, dass zehn Sekunden spaeter doch noch scharf wird.
+            profile.cancel_pending()
+
         fehler: list[str] = []
         for serial in self.client.stations:
             try:
@@ -420,7 +433,6 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
             except Exception as err:  # noqa: BLE001
                 fehler.append(f"{serial}: {err}")
 
-        profile = self.profile
         if profile is not None:
             profile.aktiv = None
 
