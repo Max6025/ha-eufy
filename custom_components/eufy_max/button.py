@@ -1,4 +1,4 @@
-"""Buttons: Livestream-Steuerung, Schwenken, Neigen, Alarm, Modi speichern."""
+"""Buttons: Livestream, Schwenken, Alarm, Modi speichern."""
 
 from __future__ import annotations
 
@@ -14,10 +14,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     DOMAIN,
-    GUARD_MODE_NAMES,
     HUB_IDENTIFIER,
-    PROFILE_AWAY,
     PROFILE_HOME,
+    PROFILE_LAGEN,
     PROFILE_NAMES,
     PTZ_DIRECTIONS,
     SIGNAL_PROFILE_UPDATE,
@@ -47,9 +46,13 @@ async def async_setup_entry(
         EufyMaxStartStreamButton(controller),
         EufyMaxStopStreamButton(controller),
         EufyMaxSaveProfileButton(client),
-        EufyMaxSaveProfileButton(client, PROFILE_HOME),
-        EufyMaxSaveProfileButton(client, PROFILE_AWAY),
     ]
+
+    # Je Lage ein eigener Knopf, damit man ein Profil einrichten kann,
+    # ohne vorher umschalten zu muessen.
+    entities.extend(
+        EufyMaxSaveProfileButton(client, lage) for lage in PROFILE_LAGEN
+    )
 
     for serial in client.devices:
         if client.has_command(serial, "device.pan_and_tilt"):
@@ -90,10 +93,9 @@ class EufyMaxStopStreamButton(EufyMaxControllerEntity, ButtonEntity):
 class EufyMaxSaveProfileButton(ButtonEntity):
     """Speichert die aktuellen Modi aller Kameras als Profil.
 
-    Drei Knoepfe: einer speichert in die Lage, auf der das Sammelpanel
-    gerade steht - das ist der normale Weg. Die beiden anderen schreiben
-    ausdruecklich nach Zuhause oder Abwesend, falls man ein Profil
-    einrichten will, ohne vorher umzuschalten.
+    Ohne Lage schreibt der Knopf in die Lage, auf der das Sammelpanel
+    gerade steht - der normale Weg im Alltag. Die Knoepfe mit Lage im
+    Namen schreiben ausdruecklich dorthin.
 
     Gespeichert wird ausschliesslich hier. Wer eine Kamera nachtraeglich
     umstellt, aendert das Profil nicht.
@@ -137,7 +139,7 @@ class EufyMaxSaveProfileButton(ButtonEntity):
         return self.client.connected and self.client.driver_connected
 
     async def async_added_to_hass(self) -> None:
-        """Auf Profiländerungen hoeren, damit die Attribute stimmen."""
+        """Auf Profilaenderungen hoeren, damit die Attribute stimmen."""
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass, SIGNAL_PROFILE_UPDATE, self._handle_update
