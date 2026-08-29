@@ -1,20 +1,25 @@
-"""Sensoren: Stream-Restzeit plus alle lesbaren Properties."""
+"""Sensoren: Stream-Restzeit, Scharfschalt-Countdown, Properties."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.util import dt as dt_util
 
-from datetime import timedelta
-
-from .const import DOMAIN, IGNORED_PROPERTIES
+from .const import (
+    DOMAIN,
+    HUB_IDENTIFIER,
+    IGNORED_PROPERTIES,
+    PROFILE_NAMES,
+    SIGNAL_ARM_STATE,
+)
 from .controller_entity import EufyMaxControllerEntity
 from .entity import EufyMaxPropertyEntity
 from .websocket import EufyMaxClient
@@ -38,6 +43,7 @@ async def async_setup_entry(
     entities: list[SensorEntity] = [
         EufyMaxStreamRemaining(client.stream),
         EufyMaxStreamEndsAt(client.stream),
+        EufyMaxArmCountdown(client),
     ]
 
     for serial in client.devices:
@@ -95,6 +101,89 @@ class EufyMaxStreamEndsAt(EufyMaxControllerEntity, SensorEntity):
     def native_value(self) -> datetime | None:
         """Abschaltzeitpunkt."""
         return self.controller.ends_at
+
+
+class EufyMaxArmCountdown(SensorEntity):
+    """Countdown bis zum Scharfschalten.
+
+    Die Standard-Alarmkarte zeigt waehrend der Vorlaufzeit nur
+    "Wird scharf geschaltet", aber keine Sekunden. Dieser Sensor liefert
+    sie - zum Danebenlegen aufs Dashboard oder fuer eine Ansage.
+    Ausserhalb einer Vorlaufzeit steht er auf 0.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_name = "Scharfschaltung in"
+    _attr_icon = "mdi:timer-alert-outline"
+    _attr_unique_id = "eufy_max_arm_countdown"
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_device_class = SensorDeviceClass.DURATION
+
+    def __init__(self, client: EufyMaxClient) -> None:
+        """Sensor initialisieren."""
+        self.client = client
+
+    @property
+    def profile(self):
+        """Profilspeicher der Integration."""
+        return getattr(self.client, "profile", None)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Gehoert zum Steuerungsgeraet."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, HUB_IDENTIFIER)},
+            name="Eufy Max Steuerung",
+            manufacturer="Max",
+            model="Livestream Controller",
+            entry_type="service",
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Jede Sekunde zeichnen, solange eine Vorlaufzeit laeuft."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, SIGNAL_ARM_STATE, self._handle_update
+            )
+        )
+        self.async_on_remove(
+            async_track_time_interval(
+                self.hass, self._async_tick, timedelta(seconds=1)
+            )
+        )
+
+    @callback
+    def _handle_update(self) -> None:
+        """Neu zeichnen."""
+        self.async_write_ha_state()
+
+    @callback
+    def _async_tick(self, _now) -> None:
+        """Nur zeichnen, solange etwas laeuft."""
+        profile = self.profile
+        if profile is not None and profile.laeuft:
+            self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> int:
+        """Verbleibende Sekunden bis zum Scharfschalten."""
+        profile = self.profile
+        return profile.restzeit if profile is not None else 0
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Worauf geschaltet wird."""
+        profile = self.profile
+        if profile is None:
+            return {}
+
+        lage = profile.pending_lage
+        return {
+            "laeuft": profile.laeuft,
+            "ziel": PROFILE_NAMES.get(lage, lage),
+            "vorlaufzeit": profile.verzoegerung,
+        }
 
 
 class EufyMaxSensor(EufyMaxPropertyEntity, SensorEntity):
