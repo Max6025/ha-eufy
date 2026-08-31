@@ -27,18 +27,21 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Akkukameras schlafen zwischen zwei Ereignissen. Ein Befehl an eine
-# schlafende Kamera wird vom Server angenommen, kommt aber nie an.
+# Akkukameras schlafen zwischen zwei Ereignissen.
 WAKE_TIMEOUT = 12
 WAKE_POLL = 0.5
 
-# Wie lange auf die Bestaetigung eines Moduswechsels gewartet wird und in
-# welchem Abstand dabei nachgefragt wird.
+# Nachkontrolle eines Moduswechsels
 GUARD_MODE_TIMEOUT = 16
 GUARD_MODE_POLL = 2
 
 # Wie oft der Modus aller Stationen von sich aus nachgelesen wird.
 STATION_POLL_INTERVAL = 60
+
+# Nur jede n-te Runde wird die Kamera direkt befragt. Die direkte
+# Abfrage kostet Zeit und belegt die Station - fuer die Anzeige reicht
+# es, sie gelegentlich zu machen.
+DEEP_POLL_EVERY = 5
 
 # Wartezeit nach einer Geraeteabfrage, bis die Antwort verarbeitet ist.
 CAMERA_INFO_DELAY = 3
@@ -83,7 +86,7 @@ class EufyMaxClient:
         self._video_handlers: dict[str, Callable[[bytes, str | None], None]] = {}
         # Damit nicht mehrere Befehle gleichzeitig dieselbe Kamera wecken
         self._wake_locks: dict[str, asyncio.Lock] = {}
-        # Damit pro Station immer nur ein Moduswechsel laeuft
+        # Damit pro Station immer nur eine Nachkontrolle laeuft
         self._guard_locks: dict[str, asyncio.Lock] = {}
         self._guard_targets: dict[str, int] = {}
         # Wird von __init__.py gesetzt
@@ -327,7 +330,6 @@ class EufyMaxClient:
         passiert. CMD_CAMERA_INFO fragt direkt die Kamera.
         """
         try:
-            await self.async_wake(serial)
             await self.async_send_command(
                 {"command": "station.get_camera_info", "serialNumber": serial}
             )
@@ -377,15 +379,20 @@ class EufyMaxClient:
     async def _async_station_poll(self) -> None:
         """Regelmaessig den Modus aller Stationen nachlesen.
 
-        Die Kamera wird nur direkt befragt, wenn ihre P2P-Sitzung ohnehin
-        steht. Eine schlafende Akkukamera dafuer zu wecken waere
-        Verschwendung.
+        Die direkte Geraeteabfrage laeuft nur jede fuenfte Runde. Sie
+        belegt die Station mehrere Sekunden - liefe sie jede Minute,
+        stuende sie einem Moduswechsel staendig im Weg.
         """
+        runde = 0
+
         while not self._closing:
             await asyncio.sleep(STATION_POLL_INTERVAL)
 
             if self._closing or not self.connected:
                 continue
+
+            runde += 1
+            tief_erlaubt = runde % DEEP_POLL_EVERY == 0
 
             for serial in list(self.stations):
                 # Waehrend eines laufenden Wechsels nicht dazwischenfunken
@@ -394,8 +401,10 @@ class EufyMaxClient:
                     continue
 
                 try:
-                    verbunden = await self.async_station_connected(serial)
-                    await self.async_refresh_station(serial, tief=verbunden)
+                    tief = False
+                    if tief_erlaubt:
+                        tief = await self.async_station_connected(serial)
+                    await self.async_refresh_station(serial, tief=tief)
                 except asyncio.CancelledError:
                     raise
                 except Exception as err:  # noqa: BLE001
@@ -494,10 +503,7 @@ class EufyMaxClient:
                     _LOGGER.debug("%s ist nach %.1f s wach", station, wartezeit)
                     return True
 
-            _LOGGER.info(
-                "%s liess sich nicht aufwecken - Befehl wird trotzdem geschickt",
-                station,
-            )
+            _LOGGER.info("%s liess sich nicht aufwecken", station)
             return False
 
     # ------------------------------------------------------------------
@@ -652,8 +658,6 @@ class EufyMaxClient:
         self, serial: str, name: str, value: Any
     ) -> None:
         """Eine Geraeteeigenschaft setzen."""
-        await self.async_wake(serial)
-
         await self.async_send_command(
             {
                 "command": "device.set_property",
@@ -670,7 +674,6 @@ class EufyMaxClient:
         self, serial: str, name: str, value: Any
     ) -> None:
         """Eine Stationseigenschaft setzen."""
-        await self.async_wake(serial)
         await self.async_send_command(
             {
                 "command": "station.set_property",
@@ -683,112 +686,124 @@ class EufyMaxClient:
             self.stations[serial][name] = value
             self._notify(serial, name)
 
+    def _guard_payload(self, serial: str, mode: int) -> dict[str, Any]:
+        """Passenden Befehl fuer den Moduswechsel bauen."""
+        if self.schema_version >= 13:
+            return {
+                "command": "station.set_property",
+                "serialNumber": serial,
+                "name": "guardMode",
+                "value": mode,
+            }
+        return {
+            "command": "station.set_guard_mode",
+            "serialNumber": serial,
+            "mode": mode,
+        }
+
     async def async_set_guard_mode(
         self, serial: str, mode: int, versuche: int = 2
     ) -> None:
-        """Guard Mode setzen - pro Station einer, der letzte gewinnt.
+        """Guard Mode setzen - sofort senden, danach absichern.
 
-        Vier Fallstricke stecken hier drin:
+        Die Reihenfolge ist hier entscheidend. Frueher wurde erst die
+        Kamera geweckt und dann gesendet. Das kostete bis zu zwoelf
+        Sekunden, und lief parallel die regelmaessige Modusabfrage, wurde
+        es noch deutlich mehr - der Befehl lag also eine halbe Minute
+        herum, bevor Eufy ihn ueberhaupt zu sehen bekam.
 
-        Erstens schlafen Akkukameras. Ein Befehl an eine schlafende
-        Kamera wird ohne Fehler angenommen und verschwindet.
-
-        Zweitens melden manche Modelle eine Aenderung nicht von selbst -
-        auf ein Ereignis zu warten hiesse, ewig zu warten.
-
-        Drittens steht der Modus fuer neuere Modelle nicht mehr in den
-        Cloud-Daten. Deshalb wird die Kamera direkt gefragt.
-
-        Viertens stapelt die Bibliothek Befehle an nicht erreichbare
-        Kameras und schickt sie alle auf einmal los, sobald die
-        Verbindung steht. Wer dreimal drueckt, weil scheinbar nichts
-        passiert, sieht die Kamera danach dreimal umschalten. Deshalb
-        laeuft pro Station nur ein Wechsel, und es gilt der zuletzt
-        gewuenschte Modus.
+        Jetzt geht der Befehl als Erstes raus. Wecken und Nachpruefen
+        laufen danach im Hintergrund und halten niemanden mehr auf.
         """
         mode = int(mode)
-        name = self.get_station(serial).get("name", serial)
 
         # Wunsch vormerken - wer zuletzt drueckt, bestimmt das Ziel.
         self._guard_targets[serial] = mode
+
+        # Sofort senden. Ist die Kamera wach, schaltet sie in
+        # Sekundenbruchteilen.
+        await self.async_send_command(self._guard_payload(serial, mode))
+
+        # Anzeige sofort mitziehen, damit die Oberflaeche nicht haengt.
+        if serial in self.stations:
+            self.stations[serial]["guardMode"] = mode
+            self._notify(serial, "guardMode")
+
+        # Alles Weitere im Hintergrund.
+        self.hass.async_create_task(
+            self._async_guard_followup(serial, mode, versuche)
+        )
+
+    async def _async_guard_followup(
+        self, serial: str, mode: int, versuche: int
+    ) -> None:
+        """Nach dem Senden absichern, dass der Wechsel wirklich ankam."""
+        name = self.get_station(serial).get("name", serial)
         lock = self._guard_locks.setdefault(serial, asyncio.Lock())
 
+        if lock.locked():
+            # Es laeuft bereits eine Nachkontrolle fuer diese Station.
+            # Die merkt am Zielwert selbst, dass sich etwas geaendert hat.
+            return
+
         async with lock:
-            ziel = self._guard_targets.get(serial, mode)
-
-            if ziel != mode:
-                _LOGGER.debug(
-                    "%s: Wunsch %s wurde von %s ueberholt", name, mode, ziel
-                )
-                return
-
             for versuch in range(1, versuche + 1):
-                await self.async_wake(serial)
-
-                # Waehrend des Weckens kann ein neuer Wunsch gekommen
-                # sein - dann ist dieser hier hinfaellig.
-                if self._guard_targets.get(serial) != ziel:
-                    return
-
-                if self.schema_version >= 13:
-                    await self.async_send_command(
-                        {
-                            "command": "station.set_property",
-                            "serialNumber": serial,
-                            "name": "guardMode",
-                            "value": ziel,
-                        }
-                    )
-                else:
-                    await self.async_send_command(
-                        {
-                            "command": "station.set_guard_mode",
-                            "serialNumber": serial,
-                            "mode": ziel,
-                        }
-                    )
-
                 wartezeit = 0.0
+
                 while wartezeit < GUARD_MODE_TIMEOUT:
                     await asyncio.sleep(GUARD_MODE_POLL)
                     wartezeit += GUARD_MODE_POLL
 
-                    if self._guard_targets.get(serial) != ziel:
+                    # Neuer Wunsch? Dann ist dieser hier hinfaellig.
+                    if self._guard_targets.get(serial) != mode:
                         return
 
                     tief = wartezeit >= GUARD_MODE_TIMEOUT / 2
                     await self.async_refresh_station(serial, tief=tief)
 
                     gemeldet = self.get_station_property(serial, "guardMode")
-                    if gemeldet is not None and int(gemeldet) == ziel:
+                    if gemeldet is not None and int(gemeldet) == mode:
                         _LOGGER.debug(
                             "%s hat Modus %s nach %.0f s bestaetigt",
                             name,
-                            ziel,
+                            mode,
                             wartezeit,
                         )
                         return
 
-                _LOGGER.warning(
-                    "%s hat den Moduswechsel auf %s nicht bestaetigt "
-                    "(Versuch %s von %s, gemeldet wird %s)",
+                if versuch >= versuche:
+                    break
+
+                _LOGGER.info(
+                    "%s hat den Moduswechsel auf %s nicht bestaetigt - "
+                    "wecke und sende erneut",
                     name,
-                    ziel,
-                    versuch,
-                    versuche,
-                    self.get_station_property(serial, "guardMode"),
+                    mode,
                 )
 
-            raise EufyMaxCommandError(
-                f"{name} meldet weiterhin Modus "
-                f"{self.get_station_property(serial, 'guardMode')} statt {ziel}"
+                await self.async_wake(serial)
+
+                if self._guard_targets.get(serial) != mode:
+                    return
+
+                try:
+                    await self.async_send_command(
+                        self._guard_payload(serial, mode)
+                    )
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Wiederholung fuer %s: %s", name, err)
+
+            _LOGGER.warning(
+                "%s meldet weiterhin Modus %s statt %s",
+                name,
+                self.get_station_property(serial, "guardMode"),
+                mode,
             )
 
     async def async_trigger_station_alarm(
         self, serial: str, seconds: int = 30
     ) -> None:
         """Sirene der Station ausloesen."""
-        await self.async_wake(serial)
         await self.async_send_command(
             {
                 "command": "station.trigger_alarm",
@@ -819,7 +834,6 @@ class EufyMaxClient:
 
     async def async_pan_and_tilt(self, serial: str, direction: int) -> None:
         """Kamera schwenken oder neigen."""
-        await self.async_wake(serial)
         await self.async_send_command(
             {
                 "command": "device.pan_and_tilt",
