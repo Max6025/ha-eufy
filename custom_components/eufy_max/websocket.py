@@ -33,6 +33,9 @@ _LOGGER = logging.getLogger(__name__)
 WAKE_TIMEOUT = 12
 WAKE_POLL = 0.5
 
+# Wie lange auf die Bestaetigung eines Moduswechsels gewartet wird
+GUARD_MODE_TIMEOUT = 8
+
 
 class EufyMaxError(Exception):
     """Allgemeiner Fehler der Integration."""
@@ -73,8 +76,9 @@ class EufyMaxClient:
         self._video_handlers: dict[str, Callable[[bytes, str | None], None]] = {}
         # Damit nicht mehrere Befehle gleichzeitig dieselbe Kamera wecken
         self._wake_locks: dict[str, asyncio.Lock] = {}
-        # Wird von __init__.py gesetzt: zentraler Livestream-Controller
+        # Wird von __init__.py gesetzt
         self.stream: Any = None
+        self.profile: Any = None
 
         self._runner: asyncio.Task | None = None
         self._reader: asyncio.Task | None = None
@@ -90,20 +94,13 @@ class EufyMaxClient:
         """Verbindung aufbauen und Watchdog starten."""
         self._closing = False
         self._session = async_get_clientsession(self.hass)
-        # Erster Verbindungsversuch synchron, damit der Config Entry
-        # sauber fehlschlaegt, wenn der Server gar nicht da ist.
         await self._async_connect_once()
         self._runner = self.hass.async_create_background_task(
             self._async_watchdog(), name="eufy_max_watchdog"
         )
 
     async def async_test(self) -> str | None:
-        """Nur pruefen, ob der Server antwortet.
-
-        Bewusst ohne start_listening und ohne Metadatenabfrage - das
-        dauert auf schwacher Hardware zu lange fuer den Einrichtungs-
-        dialog und laesst ihn in den Timeout laufen.
-        """
+        """Nur pruefen, ob der Server antwortet."""
         session = async_get_clientsession(self.hass)
         ws = await session.ws_connect(self.url, timeout=10)
         try:
@@ -171,7 +168,6 @@ class EufyMaxClient:
             self.url, heartbeat=HEARTBEAT_INTERVAL, timeout=15
         )
 
-        # Der Server schickt als erstes seine Version.
         msg = await self._ws.receive_json(timeout=15)
         if msg.get("type") != "version":
             raise EufyMaxError(f"Unerwartete Begruessung: {msg}")
@@ -185,8 +181,7 @@ class EufyMaxClient:
         )
 
         # WICHTIG: Die Leseschleife muss laufen, BEVOR der erste Befehl
-        # rausgeht. Sonst liest niemand die Antworten und jeder Befehl
-        # laeuft in den Timeout.
+        # rausgeht. Sonst liest niemand die Antworten.
         self._disconnected.clear()
         self._reader = self.hass.async_create_background_task(
             self._async_reader(), name="eufy_max_reader"
@@ -239,7 +234,6 @@ class EufyMaxClient:
                 {"command": "driver.connect"}, wait_for_ws=False
             )
 
-        # Eigenschaften, Metadaten und Befehle je Geraet nachladen.
         for serial in list(self.devices):
             await self._async_load_device_details(serial)
 
@@ -321,19 +315,7 @@ class EufyMaxClient:
     # ------------------------------------------------------------------
 
     async def _async_refresh_after_login(self) -> None:
-        """Geraeteliste nachladen, wenn sich der Treiber spaeter anmeldet.
-
-        Wenn das Add-on beim Start noch nicht bei Eufy angemeldet ist -
-        etwa nach einer abgelaufenen Sitzung -, liefert start_listening
-        eine leere Liste. Frueher blieb es dann dabei, solange die
-        WebSocket-Verbindung stand: keine Geraete, alle Entities auf
-        'nicht verfuegbar', und nur ein Neuladen von Hand half.
-
-        Jetzt wird die Liste neu geholt, sobald die Anmeldung klappt.
-        Kommen dabei Geraete dazu, die es vorher nicht gab, muessen auch
-        die Entities neu gebaut werden - dafuer wird der Eintrag neu
-        geladen.
-        """
+        """Geraeteliste nachladen, wenn sich der Treiber spaeter anmeldet."""
         if self._refreshing:
             return
 
@@ -375,11 +357,7 @@ class EufyMaxClient:
     # ------------------------------------------------------------------
 
     def station_for(self, serial: str) -> str:
-        """Zur Kamera die zustaendige Station finden.
-
-        Ohne HomeBase ist jede Kamera ihre eigene Station - dann ist die
-        Seriennummer identisch.
-        """
+        """Zur Kamera die zustaendige Station finden."""
         station = self.get_device(serial).get("stationSerialNumber")
         if station and station in self.stations:
             return station
@@ -400,12 +378,7 @@ class EufyMaxClient:
         return bool(result.get("connected", False))
 
     async def async_wake(self, serial: str) -> bool:
-        """Kamera aufwecken, bevor ein Befehl geschickt wird.
-
-        Akkukameras trennen ihre P2P-Sitzung, sobald nichts mehr passiert.
-        Ein Befehl an eine schlafende Kamera wird vom Server ohne Fehler
-        angenommen und verschwindet dann.
-        """
+        """Kamera aufwecken, bevor ein Befehl geschickt wird."""
         station = self.station_for(serial)
         lock = self._wake_locks.setdefault(station, asyncio.Lock())
 
@@ -502,8 +475,6 @@ class EufyMaxClient:
                 war_verbunden = self.driver_connected
                 self.driver_connected = True
                 self._notify_all()
-                # Beim Start war moeglicherweise noch keine Anmeldung da
-                # und die Geraeteliste blieb leer. Jetzt nachladen.
                 if not war_verbunden or not self.devices:
                     self.hass.async_create_task(
                         self._async_refresh_after_login()
@@ -517,7 +488,6 @@ class EufyMaxClient:
             return
 
         if source in ("device", "station") and serial:
-            # Rohe Videodaten des P2P-Streams direkt an die Bruecke geben.
             if name == "livestream video data":
                 handler = self._video_handlers.get(serial)
                 if handler is not None:
@@ -590,11 +560,7 @@ class EufyMaxClient:
     async def async_set_property(
         self, serial: str, name: str, value: Any
     ) -> None:
-        """Eine Geraeteeigenschaft setzen.
-
-        Vorher wird die Kamera geweckt. Ohne stehende P2P-Sitzung nimmt
-        der Server den Befehl zwar an, die Kamera bekommt ihn aber nie.
-        """
+        """Eine Geraeteeigenschaft setzen."""
         await self.async_wake(serial)
 
         await self.async_send_command(
@@ -613,6 +579,7 @@ class EufyMaxClient:
         self, serial: str, name: str, value: Any
     ) -> None:
         """Eine Stationseigenschaft setzen."""
+        await self.async_wake(serial)
         await self.async_send_command(
             {
                 "command": "station.set_property",
@@ -625,42 +592,84 @@ class EufyMaxClient:
             self.stations[serial][name] = value
             self._notify(serial, name)
 
-    async def async_set_guard_mode(self, serial: str, mode: int) -> None:
-        """Guard Mode einer Station bzw. einer eigenstaendigen Kamera setzen.
+    async def async_set_guard_mode(
+        self, serial: str, mode: int, versuche: int = 2
+    ) -> None:
+        """Guard Mode setzen - geweckt, geprueft, notfalls erneut.
 
-        Ab Schema 13 kennt eufy-security-ws den Befehl
-        station.set_guard_mode nicht mehr - er antwortet dann mit
-        unknown_command. Der Modus wird seitdem als Stationseigenschaft
-        'guardMode' gesetzt.
+        Akkukameras trennen ihre P2P-Sitzung, sobald nichts mehr
+        passiert. Ein Moduswechsel an eine schlafende Kamera wird vom
+        Server ohne Fehler angenommen und verschwindet dann - in Home
+        Assistant sieht es aus, als sei nichts geschehen. Genau das
+        Verhalten zeigen Kameras, die staendig neu verbinden.
+
+        Deshalb wird die Station erst geweckt, danach geprueft, ob der
+        Wechsel wirklich angekommen ist. Meldet die Kamera weiter den
+        alten Modus, geht es ein zweites Mal raus - mit frisch
+        aufgebauter Sitzung.
         """
         mode = int(mode)
+        name = self.get_station(serial).get("name", serial)
 
-        if self.schema_version >= 13:
-            await self.async_send_command(
-                {
-                    "command": "station.set_property",
-                    "serialNumber": serial,
-                    "name": "guardMode",
-                    "value": mode,
-                }
-            )
-        else:
-            await self.async_send_command(
-                {
-                    "command": "station.set_guard_mode",
-                    "serialNumber": serial,
-                    "mode": mode,
-                }
+        for versuch in range(1, versuche + 1):
+            # Ohne stehende Sitzung ist der Befehl verloren.
+            await self.async_wake(serial)
+
+            if self.schema_version >= 13:
+                await self.async_send_command(
+                    {
+                        "command": "station.set_property",
+                        "serialNumber": serial,
+                        "name": "guardMode",
+                        "value": mode,
+                    }
+                )
+            else:
+                await self.async_send_command(
+                    {
+                        "command": "station.set_guard_mode",
+                        "serialNumber": serial,
+                        "mode": mode,
+                    }
+                )
+
+            # Auf die Bestaetigung warten. Sie kommt als Property-Event
+            # zurueck, meist innerhalb von zwei Sekunden.
+            wartezeit = 0.0
+            while wartezeit < GUARD_MODE_TIMEOUT:
+                await asyncio.sleep(0.5)
+                wartezeit += 0.5
+
+                gemeldet = self.get_station_property(serial, "guardMode")
+                if gemeldet is not None and int(gemeldet) == mode:
+                    _LOGGER.debug(
+                        "%s hat Modus %s nach %.1f s bestaetigt",
+                        name,
+                        mode,
+                        wartezeit,
+                    )
+                    self._notify(serial, "guardMode")
+                    return
+
+            _LOGGER.info(
+                "%s hat den Moduswechsel auf %s nicht bestaetigt "
+                "(Versuch %s von %s)",
+                name,
+                mode,
+                versuch,
+                versuche,
             )
 
-        if serial in self.stations:
-            self.stations[serial]["guardMode"] = mode
-            self._notify(serial, "guardMode")
+        raise EufyMaxCommandError(
+            f"{name} hat den Moduswechsel nicht angenommen - die Kamera war "
+            f"nicht erreichbar oder ignoriert den Befehl"
+        )
 
     async def async_trigger_station_alarm(
         self, serial: str, seconds: int = 30
     ) -> None:
         """Sirene der Station ausloesen."""
+        await self.async_wake(serial)
         await self.async_send_command(
             {
                 "command": "station.trigger_alarm",
