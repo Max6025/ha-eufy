@@ -1,0 +1,129 @@
+    async def async_set_guard_mode(
+        self, serial: str, mode: int, versuche: int = 2
+    ) -> None:
+        """Guard Mode setzen - sofort senden, danach absichern.
+
+        Reihenfolge ist hier entscheidend. Frueher wurde erst die Kamera
+        geweckt und dann gesendet - das kostete bis zu zwoelf Sekunden,
+        und lief parallel die regelmaessige Modusabfrage, wurde es noch
+        deutlich mehr. Der Befehl lag also eine halbe Minute herum, bevor
+        Eufy ihn ueberhaupt zu sehen bekam.
+
+        Jetzt geht der Befehl als Erstes raus. Wecken und Nachpruefen
+        laufen danach im Hintergrund und halten niemanden mehr auf.
+        """
+        mode = int(mode)
+
+        # Wunsch vormerken - wer zuletzt drueckt, bestimmt das Ziel.
+        self._guard_targets[serial] = mode
+
+        # Sofort senden. Ist die Kamera wach, schaltet sie in
+        # Sekundenbruchteilen.
+        if self.schema_version >= 13:
+            await self.async_send_command(
+                {
+                    "command": "station.set_property",
+                    "serialNumber": serial,
+                    "name": "guardMode",
+                    "value": mode,
+                }
+            )
+        else:
+            await self.async_send_command(
+                {
+                    "command": "station.set_guard_mode",
+                    "serialNumber": serial,
+                    "mode": mode,
+                }
+            )
+
+        # Anzeige sofort mitziehen, damit die Oberflaeche nicht haengt.
+        if serial in self.stations:
+            self.stations[serial]["guardMode"] = mode
+            self._notify(serial, "guardMode")
+
+        # Alles Weitere im Hintergrund: wecken, nachpruefen, notfalls
+        # wiederholen. Der Aufrufer wartet darauf nicht.
+        self.hass.async_create_task(
+            self._async_guard_followup(serial, mode, versuche)
+        )
+
+    async def _async_guard_followup(
+        self, serial: str, mode: int, versuche: int
+    ) -> None:
+        """Nach dem Senden absichern, dass der Wechsel wirklich ankam."""
+        name = self.get_station(serial).get("name", serial)
+        lock = self._guard_locks.setdefault(serial, asyncio.Lock())
+
+        if lock.locked():
+            # Es laeuft bereits eine Nachkontrolle fuer diese Station.
+            # Die merkt am Zielwert selbst, dass sich etwas geaendert hat.
+            return
+
+        async with lock:
+            for versuch in range(1, versuche + 1):
+                wartezeit = 0.0
+
+                while wartezeit < GUARD_MODE_TIMEOUT:
+                    await asyncio.sleep(GUARD_MODE_POLL)
+                    wartezeit += GUARD_MODE_POLL
+
+                    # Neuer Wunsch? Dann ist dieser hier hinfaellig.
+                    if self._guard_targets.get(serial) != mode:
+                        return
+
+                    tief = wartezeit >= GUARD_MODE_TIMEOUT / 2
+                    await self.async_refresh_station(serial, tief=tief)
+
+                    gemeldet = self.get_station_property(serial, "guardMode")
+                    if gemeldet is not None and int(gemeldet) == mode:
+                        _LOGGER.debug(
+                            "%s hat Modus %s nach %.0f s bestaetigt",
+                            name,
+                            mode,
+                            wartezeit,
+                        )
+                        return
+
+                _LOGGER.warning(
+                    "%s hat den Moduswechsel auf %s nicht bestaetigt - "
+                    "neuer Versuch (%s von %s)",
+                    name,
+                    mode,
+                    versuch,
+                    versuche,
+                )
+
+                # Zweiter Anlauf: jetzt erst wecken und noch mal senden.
+                await self.async_wake(serial)
+
+                if self._guard_targets.get(serial) != mode:
+                    return
+
+                try:
+                    if self.schema_version >= 13:
+                        await self.async_send_command(
+                            {
+                                "command": "station.set_property",
+                                "serialNumber": serial,
+                                "name": "guardMode",
+                                "value": mode,
+                            }
+                        )
+                    else:
+                        await self.async_send_command(
+                            {
+                                "command": "station.set_guard_mode",
+                                "serialNumber": serial,
+                                "mode": mode,
+                            }
+                        )
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Wiederholung fuer %s: %s", name, err)
+
+            _LOGGER.warning(
+                "%s meldet weiterhin Modus %s statt %s",
+                name,
+                self.get_station_property(serial, "guardMode"),
+                mode,
+            )
