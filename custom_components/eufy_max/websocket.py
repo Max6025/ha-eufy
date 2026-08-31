@@ -35,13 +35,15 @@ WAKE_POLL = 0.5
 
 # Wie lange auf die Bestaetigung eines Moduswechsels gewartet wird und in
 # welchem Abstand dabei nachgefragt wird.
-GUARD_MODE_TIMEOUT = 12
+GUARD_MODE_TIMEOUT = 16
 GUARD_MODE_POLL = 2
 
 # Wie oft der Modus aller Stationen von sich aus nachgelesen wird.
-# Nicht jede Kamera meldet Aenderungen von selbst - ohne diese Abfrage
-# zeigt Home Assistant dann dauerhaft einen veralteten Modus an.
 STATION_POLL_INTERVAL = 60
+
+# Wie lange nach einer Geraeteabfrage gewartet wird, bis die Antwort
+# verarbeitet ist. Die Kamera schickt ihre Parameter asynchron.
+CAMERA_INFO_DELAY = 3
 
 
 class EufyMaxError(Exception):
@@ -191,8 +193,6 @@ class EufyMaxClient:
             self.schema_version,
         )
 
-        # WICHTIG: Die Leseschleife muss laufen, BEVOR der erste Befehl
-        # rausgeht. Sonst liest niemand die Antworten.
         self._disconnected.clear()
         self._reader = self.hass.async_create_background_task(
             self._async_reader(), name="eufy_max_reader"
@@ -285,14 +285,6 @@ class EufyMaxClient:
             _LOGGER.debug("Befehle fuer %s nicht ladbar: %s", serial, err)
             self.commands[serial] = []
 
-        _LOGGER.debug(
-            "%s (%s): %s Eigenschaften, Befehle: %s",
-            self.devices[serial].get("name", serial),
-            self.devices[serial].get("model", "?"),
-            len(self.metadata.get(serial, {})),
-            self.commands.get(serial, []),
-        )
-
     async def _async_load_station_details(self, serial: str) -> None:
         """Eigenschaften und Metadaten einer Station laden."""
         try:
@@ -325,14 +317,40 @@ class EufyMaxClient:
     # Stationen aktiv nachlesen
     # ------------------------------------------------------------------
 
-    async def async_refresh_station(self, serial: str) -> dict[str, Any]:
-        """Eigenschaften einer Station frisch vom Server holen.
+    async def async_ask_camera(self, serial: str) -> None:
+        """Die Kamera selbst nach ihren Parametern fragen.
 
-        Noetig, weil sich nicht jede Kamera von selbst meldet. Wer nur
-        auf Ereignisse wartet, sieht bei solchen Modellen ewig den alten
-        Modus - in Home Assistant steht dann "Abwesend", waehrend in der
-        Eufy-App laengst "Zeitplan" aktiv ist.
+        Der uebliche Weg fuehrt ueber die Cloud: Eufy liefert die
+        Geraetedaten, die Bibliothek macht daraus Eigenschaften. Fuer
+        neuere Modelle steht der Modus dort aber nicht mehr drin - der
+        Wert bleibt dann fuer immer auf dem Stand vom Verbindungsaufbau,
+        egal was in der App passiert.
+
+        CMD_CAMERA_INFO geht den anderen Weg: direkt an die Kamera ueber
+        P2P. Sie antwortet mit allen Parametern, und die Bibliothek
+        aktualisiert daraus ihre Eigenschaften.
         """
+        try:
+            await self.async_wake(serial)
+            await self.async_send_command(
+                {"command": "station.get_camera_info", "serialNumber": serial}
+            )
+            # Die Antwort kommt asynchron als Property-Events zurueck.
+            await asyncio.sleep(CAMERA_INFO_DELAY)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Geraeteabfrage fuer %s: %s", serial, err)
+
+    async def async_refresh_station(
+        self, serial: str, tief: bool = False
+    ) -> dict[str, Any]:
+        """Eigenschaften einer Station frisch holen.
+
+        Mit tief=True wird zuvor die Kamera selbst befragt - noetig bei
+        Modellen, deren Modus nicht mehr ueber die Cloud kommt.
+        """
+        if tief:
+            await self.async_ask_camera(serial)
+
         try:
             result = await self.async_send_command(
                 {"command": "station.get_properties", "serialNumber": serial}
@@ -350,7 +368,7 @@ class EufyMaxClient:
         station.update(props)
 
         if props.get("guardMode") != vorher:
-            _LOGGER.debug(
+            _LOGGER.info(
                 "%s meldet jetzt Modus %s (vorher %s)",
                 station.get("name", serial),
                 props.get("guardMode"),
@@ -360,16 +378,18 @@ class EufyMaxClient:
         self._notify(serial, "guardMode")
         return props
 
-    async def async_refresh_all_stations(self) -> None:
+    async def async_refresh_all_stations(self, tief: bool = False) -> None:
         """Alle Stationen nacheinander abfragen."""
         for serial in list(self.stations):
-            await self.async_refresh_station(serial)
+            await self.async_refresh_station(serial, tief=tief)
 
     async def _async_station_poll(self) -> None:
         """Regelmaessig den Modus aller Stationen nachlesen.
 
-        Damit stimmt die Anzeige auch dann, wenn jemand in der Eufy-App
-        umschaltet oder ein Zeitplan greift.
+        Die Kamera wird nur dann direkt befragt, wenn ihre P2P-Sitzung
+        ohnehin schon steht. Eine schlafende Akkukamera dafuer zu wecken
+        waere Verschwendung - die faellt beim naechsten Durchgang an,
+        sobald sie wieder verbunden ist.
         """
         while not self._closing:
             await asyncio.sleep(STATION_POLL_INTERVAL)
@@ -377,12 +397,14 @@ class EufyMaxClient:
             if self._closing or not self.connected:
                 continue
 
-            try:
-                await self.async_refresh_all_stations()
-            except asyncio.CancelledError:
-                raise
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Stationsabfrage fehlgeschlagen: %s", err)
+            for serial in list(self.stations):
+                try:
+                    verbunden = await self.async_station_connected(serial)
+                    await self.async_refresh_station(serial, tief=verbunden)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Stationsabfrage %s: %s", serial, err)
 
     # ------------------------------------------------------------------
     # Nachtraegliche Anmeldung
@@ -669,23 +691,23 @@ class EufyMaxClient:
     async def async_set_guard_mode(
         self, serial: str, mode: int, versuche: int = 2
     ) -> None:
-        """Guard Mode setzen - geweckt, nachgefragt, notfalls erneut.
+        """Guard Mode setzen - geweckt, direkt nachgefragt, notfalls erneut.
 
-        Zwei Fallstricke stecken hier drin, beide bei Akkukameras:
+        Drei Fallstricke stecken hier drin:
 
-        Erstens schlafen sie zwischen zwei Ereignissen. Ein Befehl an
-        eine schlafende Kamera wird vom Server ohne Fehler angenommen und
-        verschwindet dann. Deshalb wird vorher geweckt.
+        Erstens schlafen Akkukameras. Ein Befehl an eine schlafende
+        Kamera wird ohne Fehler angenommen und verschwindet.
 
-        Zweitens melden manche Modelle eine Aenderung nicht von selbst.
-        Auf ein Ereignis zu warten hiesse, ewig zu warten - also wird der
-        Zustand aktiv nachgefragt.
+        Zweitens melden manche Modelle eine Aenderung nicht von selbst -
+        auf ein Ereignis zu warten hiesse, ewig zu warten.
+
+        Drittens steht der Modus fuer neuere Modelle nicht mehr in den
+        Cloud-Daten. Deshalb wird die Kamera direkt gefragt.
         """
         mode = int(mode)
         name = self.get_station(serial).get("name", serial)
 
         for versuch in range(1, versuche + 1):
-            # Ohne stehende Sitzung ist der Befehl verloren.
             await self.async_wake(serial)
 
             if self.schema_version >= 13:
@@ -706,15 +728,18 @@ class EufyMaxClient:
                     }
                 )
 
-            # Aktiv nachfragen statt auf ein Ereignis zu hoffen.
             wartezeit = 0.0
             while wartezeit < GUARD_MODE_TIMEOUT:
                 await asyncio.sleep(GUARD_MODE_POLL)
                 wartezeit += GUARD_MODE_POLL
 
-                await self.async_refresh_station(serial)
-                gemeldet = self.get_station_property(serial, "guardMode")
+                # Nach der Haelfte der Zeit die Kamera direkt fragen -
+                # der schnelle Weg ueber die Cloud hat dann offenbar
+                # nichts geliefert.
+                tief = wartezeit >= GUARD_MODE_TIMEOUT / 2
+                await self.async_refresh_station(serial, tief=tief)
 
+                gemeldet = self.get_station_property(serial, "guardMode")
                 if gemeldet is not None and int(gemeldet) == mode:
                     _LOGGER.debug(
                         "%s hat Modus %s nach %.0f s bestaetigt",
@@ -724,7 +749,7 @@ class EufyMaxClient:
                     )
                     return
 
-            _LOGGER.info(
+            _LOGGER.warning(
                 "%s hat den Moduswechsel auf %s nicht bestaetigt "
                 "(Versuch %s von %s, gemeldet wird %s)",
                 name,
@@ -735,8 +760,8 @@ class EufyMaxClient:
             )
 
         raise EufyMaxCommandError(
-            f"{name} hat den Moduswechsel nicht angenommen - die Kamera war "
-            f"nicht erreichbar oder ignoriert den Befehl"
+            f"{name} meldet weiterhin Modus "
+            f"{self.get_station_property(serial, 'guardMode')} statt {mode}"
         )
 
     async def async_trigger_station_alarm(
