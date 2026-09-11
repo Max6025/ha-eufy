@@ -81,11 +81,12 @@ class EufyMaxStreamDuration(EufyMaxControllerEntity, RestoreNumber):
 
 
 class EufyMaxArmDelay(NumberEntity):
-    """Vorlaufzeit, bevor das Sammelpanel scharf schaltet.
+    """Vorlaufzeit fuer den Weg nach draussen.
 
-    Gilt fuer alle Kameras gemeinsam - das Sammelpanel schaltet die
-    Anlage ja als Ganzes. Null heisst: sofort schalten, ohne Vorlauf.
-    Unscharf ist davon nie betroffen.
+    Gilt nur, wenn das Sammelpanel auf Abwesend geht - dann fuer alle
+    Kameras gemeinsam, denn die Anlage wird ja als Ganzes geschaltet.
+    Zuhause, Schlafen und Unscharf schalten immer sofort. Null heisst:
+    auch Abwesend ohne Vorlauf.
 
     Der Wert liegt im Profilspeicher und ueberlebt damit Neustarts.
     """

@@ -70,6 +70,29 @@ Hat eine Kamera keine eigene Station, schaltet das Panel ersatzweise die
 Bewegungserkennung. Die eigenen Modi 1–3 sind die, die du in der Eufy-App selbst
 angelegt hast (Reihenfolge nach Erstellungsdatum).
 
+Das Sammelpanel schaltet **nicht** alle Kameras auf denselben Modus. Es kennt drei
+Lagen und stellt je Kamera den Modus wieder her, den du für diese Lage gespeichert
+hast:
+
+| Lage im Sammelpanel | Vorlaufzeit | Wofür |
+|---|---|---|
+| `armed_home` — Zuhause | nein, sofort | jemand ist im Haus |
+| `armed_night` — Schlafen | nein, sofort | Nacht, jemand ist im Haus |
+| `armed_away` — Abwesend | **ja** | Weg nach draußen |
+| `disarmed` — Unscharf | nein, sofort | bricht eine laufende Vorlaufzeit ab |
+
+Die Vorlaufzeit (`number.eufy_max_steuerung_vorlaufzeit_scharfschaltung`) gilt nur
+für den Wechsel nach Abwesend — dafür ist sie da: aus dem Haus kommen, ohne selbst
+die Kamera auszulösen. Zuhause und Schlafen zählen für Home Assistant zwar auch als
+Scharfschaltung, aber dabei bleibt man ja im Haus, deshalb schalten sie sofort.
+`sensor.eufy_max_steuerung_scharfschaltung_in` zeigt die Restsekunden.
+
+Gespeichert wird nie automatisch: Modi je Kamera einstellen, dann den Knopf
+`Modi speichern als …` drücken. Solange für eine Lage nichts gespeichert ist, greift
+ein Notnagel (Zuhause → Zuhause, Schlafen → Zuhause, Abwesend → Abwesend). Steht die
+Anlage ohnehin schon so, sieht das aus, als hätte der Knopf nichts getan — welche
+Lagen betroffen sind, steht im Attribut `ohne_profil` des Sammelpanels.
+
 **5. Captcha und 2FA im UI.**
 Fordert Eufy ein Captcha oder einen Code an, kommt eine Benachrichtigung mit der
 ID. Antwort per Service `eufy_max.set_captcha` bzw. `eufy_max.set_verify_code`.

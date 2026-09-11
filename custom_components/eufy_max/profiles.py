@@ -7,10 +7,14 @@ das Panel, sondern Max: einstellen, dann speichern.
 Gespeichert wird NIE automatisch. Wer nachtraeglich eine Kamera umstellt,
 aendert das Profil nicht - bis er wieder ausdruecklich speichert.
 
-Zusaetzlich gibt es eine Verzoegerung: Nach dem Druck auf eine Lage laeuft
-erst eine einstellbare Zeit ab, bevor die Modi gesetzt werden. So kommt
-man noch aus dem Haus, ohne selbst die Kamera auszuloesen. Unscharf wirkt
-immer sofort.
+Zusaetzlich gibt es eine Vorlaufzeit fuer den Weg nach draussen: Wer auf
+Abwesend schaltet, hat noch die eingestellten Sekunden, um aus dem Haus
+zu kommen, ohne selbst die Kamera auszuloesen.
+
+Nur dieser eine Weg bekommt den Countdown. Home Assistant zaehlt zwar
+auch Zuhause und Schlafen als Scharfschaltung, aber dabei bleibt man ja
+im Haus - da soll sofort geschaltet werden. Unscharf wirkt ebenfalls
+immer sofort und bricht einen laufenden Countdown ab.
 """
 
 from __future__ import annotations
@@ -52,6 +56,14 @@ STANDARD_MODUS = {
     PROFILE_AWAY: GUARD_AWAY,
     PROFILE_SLEEP: GUARD_HOME,
 }
+
+# Lagen, bei denen vor dem Scharfschalten eine Vorlaufzeit laeuft.
+#
+# Das ist ausschliesslich der Weg nach draussen. Home Assistant sieht
+# Zuhause und Schlafen zwar ebenfalls als Scharfschaltung an, aber dabei
+# bleibt man im Haus: Ein Countdown wuerde dort nur die Anlage unnoetig
+# spaet scharf machen, ohne dass ihn jemand braucht.
+LAGEN_MIT_VORLAUF = (PROFILE_AWAY,)
 
 
 class ModusProfile:
@@ -139,6 +151,18 @@ class ModusProfile:
             namen[bezeichnung] = GUARD_MODE_NAMES.get(int(modus), str(modus))
         return namen
 
+    def braucht_vorlauf(self, lage: str) -> bool:
+        """Laeuft vor dieser Lage eine Vorlaufzeit?
+
+        Nur beim Wechsel nach Abwesend - und auch dann nur, wenn die
+        Anlage nicht ohnehin schon abwesend ist. Ein erneuter Druck auf
+        dieselbe Lage stellt lediglich die gespeicherten Modi wieder her;
+        dafuer muss niemand aus dem Haus.
+        """
+        if lage not in LAGEN_MIT_VORLAUF:
+            return False
+        return self.aktiv != lage
+
     @property
     def laeuft(self) -> bool:
         """Laeuft gerade eine Verzoegerung?"""
@@ -177,7 +201,14 @@ class ModusProfile:
             modi[serial] = int(modus)
 
         self.profile[ziel] = modi
-        self.aktiv = ziel
+
+        # Nur das Speichern ohne Angabe betrifft die laufende Lage - da
+        # ist das Ziel ohnehin die aktive. Ein Knopf mit Lage im Namen
+        # legt dagegen bloss etwas ab; er schaltet nichts, also darf er
+        # auch nicht die Anzeige des Sammelpanels umspringen lassen.
+        if lage is None:
+            self.aktiv = ziel
+
         await self._async_write()
 
         _LOGGER.info(
@@ -196,12 +227,20 @@ class ModusProfile:
     ) -> list[str]:
         """Lage herstellen - sofort oder nach Ablauf der Vorlaufzeit.
 
+        Die Vorlaufzeit gilt nur fuer die Lagen in LAGEN_MIT_VORLAUF,
+        also fuer den Weg nach draussen. Zuhause und Schlafen schalten
+        sofort, auch wenn am Regler eine Zeit steht. Wer ausdruecklich
+        eine Verzoegerung uebergibt, bekommt sie in jedem Fall.
+
         Bei einer Vorlaufzeit groesser null wird nur vorgemerkt; das Panel
         zeigt so lange "Wird scharf geschaltet" und der Countdown-Sensor
         laeuft. Rueckgabe ist die Fehlerliste des sofortigen Schaltens -
         bei vorgemerktem Wechsel also immer leer.
         """
-        sekunden = self.verzoegerung if verzoegerung is None else int(verzoegerung)
+        if verzoegerung is None:
+            sekunden = self.verzoegerung if self.braucht_vorlauf(lage) else 0
+        else:
+            sekunden = int(verzoegerung)
 
         # Eine bereits laufende Vormerkung wird ersetzt.
         self.cancel_pending(benachrichtigen=False)
@@ -291,10 +330,18 @@ class ModusProfile:
                 self.uebersicht(lage),
             )
         else:
-            _LOGGER.info(
-                "Fuer '%s' ist noch nichts gespeichert - alle Kameras auf %s",
+            # Kein Profil hinterlegt: Es passiert zwar etwas, aber eben
+            # nur der Notnagel. Stand die Anlage ohnehin schon so, sieht
+            # es von aussen aus, als haette der Knopf nichts bewirkt -
+            # deshalb hier eine Warnung statt einer stillen Notiz.
+            _LOGGER.warning(
+                "Fuer die Lage '%s' ist noch kein Profil gespeichert. "
+                "Alle Kameras laufen deshalb auf '%s'. Zum Einrichten: "
+                "Modi je Kamera einstellen, dann den Knopf 'Modi "
+                "speichern als %s' druecken.",
                 PROFILE_NAMES.get(lage, lage),
                 GUARD_MODE_NAMES.get(standard, standard),
+                PROFILE_NAMES.get(lage, lage),
             )
 
         return fehler

@@ -9,10 +9,12 @@ Schlafen) und setzt beim Umschalten NICHT alle Kameras auf denselben
 Modus, sondern stellt je Kamera den gespeicherten Modus wieder her.
 Gespeichert wird ausschliesslich ueber die Knoepfe am Steuerungsgeraet.
 
-Ist am Steuerungsgeraet eine Vorlaufzeit eingestellt, geht das Panel nach
-dem Druck zuerst in "Wird scharf geschaltet"; erst nach Ablauf werden die
-Modi gesetzt. Unscharf wirkt immer sofort und bricht eine laufende
-Vorlaufzeit ab.
+Die Vorlaufzeit vom Steuerungsgeraet gilt nur fuer den Weg nach draussen:
+Wer auf Abwesend schaltet, sieht zuerst "Wird scharf geschaltet"; erst
+nach Ablauf werden die Modi gesetzt. Zuhause und Schlafen schalten immer
+sofort - Home Assistant zaehlt beides zwar als Scharfschaltung, aber
+dabei bleibt man ja im Haus. Unscharf wirkt ebenfalls sofort und bricht
+eine laufende Vorlaufzeit ab.
 """
 
 from __future__ import annotations
@@ -50,12 +52,14 @@ from .const import (
     PROFILE_AWAY,
     PROFILE_HOME,
     PROFILE_LAGEN,
+    PROFILE_NAMES,
     PROFILE_SLEEP,
     SIGNAL_ARM_STATE,
     SIGNAL_DEVICE_UPDATE,
     SIGNAL_PROFILE_UPDATE,
 )
 from .entity import EufyMaxEntity
+from .profiles import LAGEN_MIT_VORLAUF
 from .websocket import EufyMaxClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -331,9 +335,10 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
     def alarm_state(self) -> AlarmControlPanelState | None:
         """Zustand ist die zuletzt angewandte Lage.
 
-        Waehrend einer laufenden Vorlaufzeit steht das Panel auf
-        "Wird scharf geschaltet". Bewusst nicht aus den Einzelmodi
-        abgeleitet: Die duerfen ja absichtlich unterschiedlich sein.
+        Waehrend einer laufenden Vorlaufzeit - die es nur auf dem Weg
+        nach Abwesend gibt - steht das Panel auf "Wird scharf
+        geschaltet". Bewusst nicht aus den Einzelmodi abgeleitet: Die
+        duerfen ja absichtlich unterschiedlich sein.
         """
         profile = self.profile
 
@@ -379,15 +384,29 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
         if profile is not None:
             attribute["lage"] = profile.aktiv
             attribute["vorlaufzeit"] = profile.verzoegerung
+            attribute["vorlaufzeit_gilt_fuer"] = list(LAGEN_MIT_VORLAUF)
             attribute["restzeit"] = profile.restzeit
             attribute["wird_geschaltet_auf"] = profile.pending_lage
             for lage in PROFILE_LAGEN:
                 attribute[f"profil_{lage}"] = profile.uebersicht(lage)
 
+            # Fuer diese Lagen greift nur der Notnagel-Modus. Wer sich
+            # wundert, warum ein Knopf scheinbar nichts bewirkt, sieht
+            # hier sofort, dass schlicht nichts gespeichert ist.
+            attribute["ohne_profil"] = [
+                PROFILE_NAMES[lage]
+                for lage in PROFILE_LAGEN
+                if not profile.ist_gespeichert(lage)
+            ]
+
         return attribute
 
     async def _async_lage(self, lage: str) -> None:
-        """Lage anfordern - mit Vorlaufzeit, falls eingestellt."""
+        """Lage anfordern.
+
+        Ob dabei eine Vorlaufzeit laeuft, entscheidet der Profilspeicher -
+        es gibt sie nur auf dem Weg nach Abwesend.
+        """
         profile = self.profile
         if profile is None:
             raise HomeAssistantError(
@@ -407,15 +426,15 @@ class EufyMaxMasterAlarmPanel(AlarmControlPanelEntity):
             )
 
     async def async_alarm_arm_home(self, code: str | None = None) -> None:
-        """Lage Zuhause herstellen."""
+        """Lage Zuhause herstellen - sofort, ohne Vorlaufzeit."""
         await self._async_lage(PROFILE_HOME)
 
     async def async_alarm_arm_away(self, code: str | None = None) -> None:
-        """Lage Abwesend herstellen."""
+        """Lage Abwesend herstellen - mit Vorlaufzeit, falls eingestellt."""
         await self._async_lage(PROFILE_AWAY)
 
     async def async_alarm_arm_night(self, code: str | None = None) -> None:
-        """Lage Schlafen herstellen."""
+        """Lage Schlafen herstellen - sofort, ohne Vorlaufzeit."""
         await self._async_lage(PROFILE_SLEEP)
 
     async def async_alarm_disarm(self, code: str | None = None) -> None:
