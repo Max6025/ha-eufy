@@ -43,6 +43,13 @@ STATION_POLL_INTERVAL = 60
 # es, sie gelegentlich zu machen.
 DEEP_POLL_EVERY = 5
 
+# Akkukameras haengen zwischen zwei Befehlen nicht am P2P; ihr Modus
+# steht bei neueren Modellen (C37) auch nicht in der Cloud. Ohne Wecken
+# wuerde eine Aenderung aus der Eufy-App also nie ankommen. Deshalb
+# jede n-te Runde aufwecken - kostet eine kurze Verbindung, danach
+# schlaeft die Kamera nach 30 s von selbst wieder ein.
+WAKE_POLL_EVERY = 10
+
 # Wartezeit nach einer Geraeteabfrage, bis die Antwort verarbeitet ist.
 CAMERA_INFO_DELAY = 3
 
@@ -404,6 +411,8 @@ class EufyMaxClient:
                     tief = False
                     if tief_erlaubt:
                         tief = await self.async_station_connected(serial)
+                        if not tief and runde % WAKE_POLL_EVERY == 0:
+                            tief = await self.async_wake(serial)
                     await self.async_refresh_station(serial, tief=tief)
                 except asyncio.CancelledError:
                     raise
