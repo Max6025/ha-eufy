@@ -800,6 +800,16 @@ class EufyMaxClient:
                 mode,
             )
 
+    def guard_change_running(self, serial: str) -> bool:
+        """Laeuft fuer diese Station gerade eine Nachkontrolle?
+
+        Solange ja, ist ein abweichender Modus kein Befund, sondern
+        Arbeit in Gang - die Kamera wird geweckt und bekommt den Befehl
+        noch einmal. Erst wenn die Nachkontrolle aufgibt, zaehlt es.
+        """
+        lock = self._guard_locks.get(serial)
+        return lock is not None and lock.locked()
+
     async def async_trigger_station_alarm(
         self, serial: str, seconds: int = 30
     ) -> None:

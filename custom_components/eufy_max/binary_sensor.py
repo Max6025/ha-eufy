@@ -9,6 +9,11 @@ Bei ganz neuen Modellen kommt ueber den Push-Kanal teils gar nichts an.
 Fuer die gibt es zusaetzlich einen Sensor, der anschlaegt, sobald Eufy
 ein neues Ereignisbild meldet. Das ist langsamer als Push, aber es
 zeigt zuverlaessig, dass die Kamera ausgeloest hat.
+
+Am Steuerungsgeraet haengt ausserdem die Kontrollleuchte "Modus weicht
+ab": Sie geht an, sobald eine Kamera nicht auf dem Modus steht, den die
+aktive Lage des Sammelpanels vorsieht. Niemand kann sie von Hand
+schalten - sie zeigt nur, was ist.
 """
 
 from __future__ import annotations
@@ -21,10 +26,19 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    HUB_IDENTIFIER,
+    PROFILE_NAMES,
+    SIGNAL_ARM_STATE,
+    SIGNAL_DEVICE_UPDATE,
+    SIGNAL_PROFILE_UPDATE,
+)
 from .entity import EufyMaxEntity
 from .stream import camera_serials
 from .websocket import EufyMaxClient
@@ -87,6 +101,9 @@ async def async_setup_entry(
     # Zusaetzlicher Ausloese-Sensor fuer jede Kamera
     for serial in camera_serials(client):
         entities.append(EufyMaxTriggerSensor(client, serial))
+
+    if client.stations:
+        entities.append(EufyMaxModeMismatchSensor(client))
 
     async_add_entities(entities)
 
@@ -171,3 +188,90 @@ class EufyMaxTriggerSensor(EufyMaxEntity, BinarySensorEntity):
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
+
+
+class EufyMaxModeMismatchSensor(BinarySensorEntity):
+    """Kontrollleuchte: Steht jede Kamera auf dem Modus ihrer Lage?
+
+    Verglichen wird der gemeldete Guard Mode jeder Station mit dem, was
+    das Profil der aktiven Lage fuer sie vorsieht. Sobald eine abweicht,
+    geht die Leuchte an - rot in der Karte, weil Geraeteklasse "Problem".
+    Welche Kamera es ist und was sie stattdessen meldet, steht in den
+    Attributen.
+
+    Ruhig bleibt sie, solange
+    - keine Lage aktiv ist (nach Unscharf oder vor dem ersten Wechsel),
+    - die Nachkontrolle eines Wechsels noch laeuft,
+    - das Profil fuer die Kamera Zeitplan oder Geofence vorsieht.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_name = "Modus weicht ab"
+    _attr_unique_id = "eufy_max_mode_mismatch"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_icon = "mdi:shield-alert"
+
+    def __init__(self, client: EufyMaxClient) -> None:
+        """Sensor initialisieren."""
+        self.client = client
+
+    @property
+    def profile(self):
+        """Profilspeicher der Integration."""
+        return getattr(self.client, "profile", None)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Gehoert zum Steuerungsgeraet."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, HUB_IDENTIFIER)},
+            name="Eufy Max Steuerung",
+            manufacturer="Max",
+            model="Livestream Controller",
+            entry_type="service",
+        )
+
+    @property
+    def available(self) -> bool:
+        """Verfuegbar, solange die Verbindung steht."""
+        return self.client.connected and self.client.driver_connected
+
+    async def async_added_to_hass(self) -> None:
+        """Auf jede Station, das Profil und den Wechselvorgang hoeren."""
+        for serial in self.client.stations:
+            self.async_on_remove(
+                async_dispatcher_connect(
+                    self.hass,
+                    f"{SIGNAL_DEVICE_UPDATE}_{serial}",
+                    self._handle_update,
+                )
+            )
+        for signal in (SIGNAL_PROFILE_UPDATE, SIGNAL_ARM_STATE):
+            self.async_on_remove(
+                async_dispatcher_connect(self.hass, signal, self._handle_update)
+            )
+
+    @callback
+    def _handle_update(self) -> None:
+        """Neu zeichnen."""
+        self.async_write_ha_state()
+
+    @property
+    def is_on(self) -> bool:
+        """Weicht mindestens eine Kamera ab?"""
+        profile = self.profile
+        if profile is None:
+            return False
+        return bool(profile.abweichungen())
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Welche Lage gilt, wer abweicht und was gemeldet wird."""
+        profile = self.profile
+        if profile is None:
+            return {}
+        return {
+            "lage": PROFILE_NAMES.get(profile.aktiv) if profile.aktiv else None,
+            "abweichend": profile.abweichungen(),
+        }

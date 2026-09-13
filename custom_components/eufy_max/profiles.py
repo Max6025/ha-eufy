@@ -31,9 +31,11 @@ from homeassistant.util import dt as dt_util
 from .const import (
     DEFAULT_ARM_DELAY,
     GUARD_AWAY,
+    GUARD_GEO,
     GUARD_HOME,
     GUARD_MODE_NAMES,
     GUARD_MODE_PROPERTY,
+    GUARD_SCHEDULE,
     PROFILE_AWAY,
     PROFILE_HOME,
     PROFILE_LAGEN,
@@ -56,6 +58,11 @@ STANDARD_MODUS = {
     PROFILE_AWAY: GUARD_AWAY,
     PROFILE_SLEEP: GUARD_HOME,
 }
+
+# Modi, bei denen Eufy selbst entscheidet, was gerade gilt. Steht so
+# einer im Profil, ist jeder gemeldete Modus in Ordnung - Zeitplan und
+# Geofence wechseln von allein, dagegen soll niemand anlaufen.
+SELBSTSTAENDIGE_MODI = (GUARD_SCHEDULE, GUARD_GEO)
 
 # Lagen, bei denen vor dem Scharfschalten eine Vorlaufzeit laeuft.
 #
@@ -150,6 +157,53 @@ class ModusProfile:
             bezeichnung = station.get("name") or serial
             namen[bezeichnung] = GUARD_MODE_NAMES.get(int(modus), str(modus))
         return namen
+
+    def erwarteter_modus(self, serial: str) -> int | None:
+        """Welchen Modus diese Station in der aktiven Lage haben sollte.
+
+        None, wenn gerade keine Lage aktiv ist - dann gibt es auch
+        nichts, woran man die Kamera messen koennte.
+        """
+        if self.aktiv not in PROFILE_LAGEN:
+            return None
+        gespeichert = self.profile.get(self.aktiv, {})
+        return gespeichert.get(serial, STANDARD_MODUS.get(self.aktiv, GUARD_HOME))
+
+    def abweichungen(self) -> list[dict[str, str | None]]:
+        """Kameras, die nicht auf dem Modus der aktiven Lage stehen.
+
+        Ausgenommen sind Kameras, deren Profil einen selbststaendigen
+        Modus (Zeitplan, Geofence) vorsieht, und solche, fuer die die
+        Nachkontrolle noch laeuft. Waehrend einer Vorlaufzeit gilt noch
+        die alte Lage - die Kameras stehen ja auch noch so.
+        """
+        befunde: list[dict[str, str | None]] = []
+
+        for serial in self.client.stations:
+            soll = self.erwarteter_modus(serial)
+            if soll is None or soll in SELBSTSTAENDIGE_MODI:
+                continue
+            if self.client.guard_change_running(serial):
+                continue
+
+            ist = self.client.get_station_property(serial, GUARD_MODE_PROPERTY)
+            if ist is not None and int(ist) == soll:
+                continue
+
+            befunde.append(
+                {
+                    "kamera": self.client.get_station(serial).get("name", serial),
+                    "station": serial,
+                    "soll": GUARD_MODE_NAMES.get(soll, str(soll)),
+                    "ist": (
+                        GUARD_MODE_NAMES.get(int(ist), str(ist))
+                        if ist is not None
+                        else None
+                    ),
+                }
+            )
+
+        return befunde
 
     def braucht_vorlauf(self, lage: str) -> bool:
         """Laeuft vor dieser Lage eine Vorlaufzeit?

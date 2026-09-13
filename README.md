@@ -93,6 +93,14 @@ ein Notnagel (Zuhause → Zuhause, Schlafen → Zuhause, Abwesend → Abwesend).
 Anlage ohnehin schon so, sieht das aus, als hätte der Knopf nichts getan — welche
 Lagen betroffen sind, steht im Attribut `ohne_profil` des Sammelpanels.
 
+Ob die Anlage wirklich so steht, wie das Sammelpanel es vorgibt, zeigt
+`binary_sensor.eufy_max_steuerung_modus_weicht_ab` (Geräteklasse *Problem*, also rot):
+an, sobald eine Kamera einen anderen Modus meldet als ihr Profil für die aktive Lage
+vorsieht — etwa weil eine Akkukamera den Wechsel nicht angenommen hat. Wer abweicht
+und was gemeldet wird, steht im Attribut `abweichend`. Kameras, deren Profil *Zeitplan*
+oder *Geofence* vorsieht, zählen nicht mit; während der Nachkontrolle eines Wechsels
+bleibt die Leuchte ebenfalls aus. Von Hand schalten lässt sie sich nicht.
+
 **5. Captcha und 2FA im UI.**
 Fordert Eufy ein Captcha oder einen Code an, kommt eine Benachrichtigung mit der
 ID. Antwort per Service `eufy_max.set_captcha` bzw. `eufy_max.set_verify_code`.
