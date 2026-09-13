@@ -32,6 +32,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 
 from .const import (
+    CAMERA_ENABLED_PROPERTY,
     DOMAIN,
     HUB_IDENTIFIER,
     PROFILE_NAMES,
@@ -101,6 +102,11 @@ async def async_setup_entry(
     # Zusaetzlicher Ausloese-Sensor fuer jede Kamera
     for serial in camera_serials(client):
         entities.append(EufyMaxTriggerSensor(client, serial))
+
+    # Datenschutzmodus fuer jede Kamera, die sich abschalten laesst
+    for serial in client.devices:
+        if CAMERA_ENABLED_PROPERTY in client.get_metadata(serial):
+            entities.append(EufyMaxPrivacySensor(client, serial))
 
     if client.stations:
         entities.append(EufyMaxModeMismatchSensor(client))
@@ -275,3 +281,26 @@ class EufyMaxModeMismatchSensor(BinarySensorEntity):
             "lage": PROFILE_NAMES.get(profile.aktiv) if profile.aktiv else None,
             "abweichend": profile.abweichungen(),
         }
+
+
+class EufyMaxPrivacySensor(EufyMaxEntity, BinarySensorEntity):
+    """Datenschutzmodus - an, wenn die Kamera abgeschaltet ist.
+
+    Eufy fuehrt das als Eigenschaft "enabled": Kamera aktiv = kein
+    Datenschutz. Der Schalter "Kamera aktiv" zeigt also das Gegenteil
+    von dem, was man wissen will. Dieser Sensor dreht es um: an heisst
+    Datenschutzmodus an, die Kamera sieht und hoert nichts.
+    """
+
+    _attr_name = "Datenschutzmodus"
+    _attr_icon = "mdi:eye-off"
+
+    def __init__(self, client: EufyMaxClient, serial: str) -> None:
+        """Sensor initialisieren."""
+        super().__init__(client, serial)
+        self._attr_unique_id = f"{serial}_datenschutz"
+
+    @property
+    def is_on(self) -> bool:
+        """Datenschutzmodus aktiv?"""
+        return not self.get_property(CAMERA_ENABLED_PROPERTY, True)
