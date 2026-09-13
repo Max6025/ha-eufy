@@ -10,6 +10,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 
 from .const import DOMAIN, SIGNAL_DEVICE_UPDATE
+from .namen import name as deutscher_name
 from .websocket import EufyMaxClient
 
 
@@ -83,19 +84,10 @@ class EufyMaxPropertyEntity(EufyMaxEntity):
         self.prop = prop
         self.meta = meta
         self._attr_unique_id = f"{serial}_{prop}"
-        self._attr_name = meta.get("label") or _humanize(prop)
+        self._attr_name = deutscher_name(prop, meta.get("label"))
 
     @property
     def native_value(self) -> Any:
         """Rohwert der Eigenschaft."""
         return self.get_property(self.prop)
 
-
-def _humanize(prop: str) -> str:
-    """camelCase-Property in lesbaren Namen umwandeln."""
-    out = ""
-    for char in prop:
-        if char.isupper() and out:
-            out += " "
-        out += char
-    return out[:1].upper() + out[1:]

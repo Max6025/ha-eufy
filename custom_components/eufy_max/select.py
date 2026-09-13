@@ -36,6 +36,7 @@ from .const import (
     SIGNAL_DEVICE_UPDATE,
 )
 from .entity import EufyMaxPropertyEntity
+from .namen import wert as deutscher_wert
 from .websocket import EufyMaxClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -164,9 +165,16 @@ class EufyMaxSelect(EufyMaxPropertyEntity, SelectEntity):
     def __init__(self, client, serial, prop, meta) -> None:
         """Zustandsliste aus den Metadaten uebernehmen."""
         super().__init__(client, serial, prop, meta)
-        self._states: dict[str, str] = {
-            str(key): str(value) for key, value in meta.get("states", {}).items()
-        }
+        # Schluessel -> deutscher Anzeigetext. Doppelte Uebersetzungen
+        # (z.B. zwei englische Werte mit demselben deutschen Wort) werden
+        # mit dem Original ergaenzt, damit die Auswahl eindeutig bleibt.
+        roh = {str(key): str(value) for key, value in meta.get("states", {}).items()}
+        self._states: dict[str, str] = {}
+        for key, value in roh.items():
+            text = deutscher_wert(value)
+            if text in self._states.values():
+                text = f"{text} ({value})"
+            self._states[key] = text
         self._attr_options = list(self._states.values())
 
     @property
