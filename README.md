@@ -108,6 +108,10 @@ ID. Antwort per Service `eufy_max.set_captcha` bzw. `eufy_max.set_verify_code`.
 Diese Integration braucht das zugehörige Add-on aus dem separaten Repo
 [eufy_max_addon](https://github.com/Max6025/eufy_max_addon).
 
+Das Logo der Integration liegt in `custom_components/eufy_max/brand/` und wird ab
+Home Assistant 2026.3 direkt von dort geladen (Brands Proxy API) — kein Eintrag im
+Brands-Repository nötig.
+
 ## Schritt 1 — Add-on installieren
 
 Einstellungen → Add-ons → Add-on-Store → drei Punkte oben rechts →
